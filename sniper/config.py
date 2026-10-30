@@ -151,7 +151,7 @@ SETTING_DEFAULTS = {
     "scanner_factory_on":    "1",
     "scanner_last_block":    "0",
     # ---- 🕵️ Insider Tracker (v16.1): sumber sinyal KETIGA (copy-trade smart money) ----
-    "tracker_on":            "0",
+    "tracker_on":                    "1",
     "tracker_last_block":    "0",
     # ---- 🔔 Insider alert-only (v16.8, Opsi 1) ----
     # "1" = insider buy CUMA kirim notifikasi Telegram ringkas (tanpa

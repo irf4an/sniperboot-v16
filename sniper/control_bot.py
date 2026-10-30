@@ -1182,8 +1182,12 @@ def _screen_one_wallet(si, addr):
         rows = si.cross_check([addr]) or []
     except Exception:
         rows = []
+    def _match(row):
+        a = row.get("address") if isinstance(row, dict) else row[0]
+        return str(a).lower() == addr
+
     if rows:
-        return [r for r in rows if r[0] == addr] or rows[:1]
+        return [r for r in rows if _match(r)] or rows[:1]
     try:
         cas_all = si.fetch_gainers(10) or []
     except Exception:
@@ -1194,5 +1198,5 @@ def _screen_one_wallet(si, addr):
         rows = si.cross_check(cas_all) or []
     except Exception:
         return []
-    return [r for r in rows if r[0] == addr]
+    return [r for r in rows if _match(r)]
 

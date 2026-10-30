@@ -724,11 +724,16 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
 
 
 def get_active_insiders() -> list:
-    """Daftar address insider yang aktif (huruf kecil, siap dibandingkan)."""
+    """Daftar address insider yang aktif (huruf kecil, siap dibandingkan).
+    Mengecualikan alamat sybil botnet yang ada di sybil_blacklist.
+    """
     with _lock, _conn() as c:
         _init_insider_wallets(c)
-        rows = c.execute(
-            "SELECT address FROM insider_wallets WHERE enabled=1").fetchall()
+        rows = c.execute("""
+            SELECT address FROM insider_wallets
+            WHERE enabled=1
+              AND address NOT IN (SELECT address FROM sybil_blacklist)
+        """).fetchall()
     return [r["address"].lower() for r in rows]
 
 
