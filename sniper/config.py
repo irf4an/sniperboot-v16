@@ -196,6 +196,21 @@ SETTING_DEFAULTS = {
     #  default window 24 jam.)
     "clone_max_entries_per_day": "3",
     "clone_entry_window_hours":  "24",
+    # ---- 📡 RADAR PONS V2 (alert-only, early warning via Telegram) ----
+    # Membaca event TokenLaunched dari factory Pons V2 (0x7ed598…) SEBELUM
+    # token graduate ke Uniswap v4, menyaring sampah, lalu mengirim alert ke
+    # DM admin. Radar ini TIDAK PERNAH memanggil listener.process_ca atau
+    # trader.buy — token pre-graduasi mustahil dibeli lewat jalur ini.
+    "pons_radar_on":               "0",   # 1 = radar hidup
+    "pons_llm_on":                 "1",   # tier LLM sebagai hakim akhir
+    "pons_llm_model":              "groq/openai/gpt-oss-120b",  # terverifikasi: JSON valid ~1,1 s
+    "pons_last_block":             "0",   # watermark getLogs (dikelola radar)
+    "pons_max_per_cycle":          "25",  # kandidat diproses per siklus
+    "pons_enrich_concurrency":     "5",   # panggilan RPC paralel saat enrich
+    "pons_alert_min_score":        "60",  # ambang skor 0-100 untuk alert
+    "pons_alert_max_per_hour":     "15",  # cap alert Telegram per jam
+    "pons_queue_ttl_sec":          "3600",# kandidat basi → status expired
+    "pons_radar_public":           "0",   # 1 = digest publik (opsi C, mati)
     # ---- 📡 Userbot Telegram (alpha groups listener) — 100% OPSIONAL ----
     # Default '0' = NONAKTIF: akun pribadi tidak online di VPS (bebas risiko
     # ban/flag), sinyal 100% dipasok on-chain (factory & insider tracker).
@@ -271,6 +286,12 @@ SETTING_LABELS = {
     "sybil_cluster_window_sec":   "🤖 Sybil Guard: jendela waktu serempak detik (60)",
     "clone_max_entries_per_day": "🛡 Clone guard: maks entry per keluarga operator",
     "clone_entry_window_hours":  "🛡 Clone guard: jendela hitung entry (jam)",
+    "pons_radar_on":             "📡 Radar Pons V2: alert awal pre-graduasi (1/0)",
+    "pons_llm_on":               "🧠 Radar Pons: saring pakai LLM (1/0)",
+    "pons_llm_model":            "🤖 Radar Pons: model LLM (kosong = agent_model)",
+    "pons_alert_min_score":      "🎚 Radar Pons: skor minimal alert (0-100)",
+    "pons_alert_max_per_hour":   "🔔 Radar Pons: cap alert Telegram per jam",
+    "pons_radar_public":         "📣 Radar Pons: digest ke channel publik (1/0)",
     "userbot_enabled":       "📡 Userbot Telegram alpha groups (1/0, default 0=off)",
 }
 

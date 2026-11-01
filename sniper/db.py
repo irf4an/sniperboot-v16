@@ -101,6 +101,28 @@ def init():
             wallet_count INTEGER,
             span_sec INTEGER,
             detected_at INTEGER)""")
+        # ---- 📡 Radar Pons V2 (alert-only, TIDAK pernah masuk pipa beli) ----
+        # Satu baris = satu event TokenLaunched dari factory Pons V2.
+        # status: new → (enriched) → alerted | rejected | expired
+        # Tidak ada kolom yang dipakai listener.process_ca / trader.buy.
+        c.execute("""CREATE TABLE IF NOT EXISTS pons_queue(
+            ca TEXT PRIMARY KEY,
+            deployer TEXT,
+            curve TEXT,
+            launch_block INTEGER,
+            launch_ts INTEGER,
+            symbol TEXT,
+            name TEXT,
+            total_supply REAL,
+            status TEXT DEFAULT 'new',
+            score INTEGER,
+            verdict TEXT,
+            reason TEXT,
+            llm_model TEXT,
+            checked_at INTEGER,
+            alerted_at INTEGER)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pons_status ON pons_queue(status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pons_launch_ts ON pons_queue(launch_ts)")
         for k, v in config.SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
         # v16.5 (Solusi B): migrasi DB lama — longgarkan slippage anchor
@@ -988,6 +1010,153 @@ def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) 
                     c.execute("DELETE FROM insider_buys WHERE wallet = ?", (w,))
 
         return clusters
+
+
+# ==================== 📡 RADAR PONS V2 (alert-only) ====================
+# Lapisan data MURNI: tidak ada RPC, tidak ada Telegram, tidak ada keputusan
+# beli. Radar (sniper/pons_radar.py) yang mengisi & membacanya. Tabel ini
+# sengaja TERPISAH dari calls/positions supaya token pre-graduasi mustahil
+# ikut masuk pipa listener.process_ca / trader.buy.
+_PONS_UPDATABLE = {"symbol", "name", "total_supply", "status", "score",
+                   "verdict", "reason", "llm_model", "checked_at", "alerted_at"}
+
+
+def add_pons_token(ca, deployer=None, curve=None, launch_block=0, launch_ts=0) -> bool:
+    """Catat satu event TokenLaunched Pons V2.
+
+    Return True bila benar-benar baru (INSERT berhasil), False bila CA sudah
+    pernah tercatat. Dedup di level PRIMARY KEY — event yang terbaca ulang
+    karena watermark mundur tidak akan menggandakan baris.
+    """
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return False
+    with _lock, _conn() as c:
+        cur = c.execute(
+            """INSERT OR IGNORE INTO pons_queue
+               (ca, deployer, curve, launch_block, launch_ts, status)
+               VALUES (?,?,?,?,?, 'new')""",
+            (ca, (deployer or "").strip().lower() or None,
+             (curve or "").strip().lower() or None,
+             int(launch_block or 0), int(launch_ts or 0)))
+        return cur.rowcount > 0
+
+
+def update_pons_token(ca, **fields):
+    """Update kolom pons_queue yang diizinkan saja (whitelist _PONS_UPDATABLE)."""
+    kv = {k: v for k, v in fields.items() if k in _PONS_UPDATABLE}
+    if not kv or not ca:
+        return
+    sets = ", ".join(f"{k}=?" for k in kv)
+    with _lock, _conn() as c:
+        c.execute(f"UPDATE pons_queue SET {sets} WHERE ca=?",
+                  (*kv.values(), str(ca).strip().lower()))
+
+
+def get_pons_pending(limit=50) -> list:
+    """Antrean yang belum diputuskan, urut paling tua dulu (FIFO)."""
+    with _lock, _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM pons_queue WHERE status='new' "
+            "ORDER BY launch_ts ASC LIMIT ?", (int(limit),))]
+
+
+def reject_pons(ca, reason, status="rejected", score=0, verdict="BUANG",
+                llm_model=None):
+    """Tandai kandidat ditolak (heuristik maupun LLM) + simpan alasannya."""
+    update_pons_token(ca, status=status, reason=(reason or "")[:400],
+                      score=int(score or 0), verdict=verdict,
+                      llm_model=llm_model, checked_at=int(time.time()))
+
+
+def mark_pons_alerted(ca, symbol=None, name=None, score=0, verdict="AMAN",
+                      reason="", llm_model=None):
+    """Tandai kandidat sudah dikirim sebagai alert Telegram."""
+    now = int(time.time())
+    update_pons_token(ca, symbol=symbol, name=name, score=int(score or 0),
+                      verdict=verdict, reason=(reason or "")[:400],
+                      llm_model=llm_model, status="alerted",
+                      checked_at=now, alerted_at=now)
+
+
+def expire_pons_queue(max_age_sec=3600) -> int:
+    """Kandidat 'new' yang sudah kelewat tua dianggap tidak relevan."""
+    cutoff = int(time.time()) - int(max_age_sec)
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "UPDATE pons_queue SET status='expired' "
+            "WHERE status='new' AND launch_ts > 0 AND launch_ts < ?", (cutoff,))
+        return cur.rowcount
+
+
+def pons_alert_count_since(ts) -> int:
+    """Jumlah alert terkirim sejak `ts` — dipakai cap per jam."""
+    with _lock, _conn() as c:
+        return int(c.execute(
+            "SELECT COUNT(*) FROM pons_queue WHERE status='alerted' AND alerted_at >= ?",
+            (int(ts),)).fetchone()[0])
+
+
+def pons_stats(hours=24) -> dict:
+    """Ringkasan radar: hitungan per status + alert dalam jendela `hours`."""
+    cutoff = int(time.time()) - int(hours) * 3600
+    out = {"total": 0, "new": 0, "alerted": 0, "rejected": 0,
+           "expired": 0, "alerts_24h": 0}
+    with _lock, _conn() as c:
+        for r in c.execute("SELECT status, COUNT(*) n FROM pons_queue GROUP BY status"):
+            out[r["status"]] = int(r["n"])
+            out["total"] += int(r["n"])
+        out["alerts_24h"] = int(c.execute(
+            "SELECT COUNT(*) FROM pons_queue WHERE status='alerted' AND alerted_at >= ?",
+            (cutoff,)).fetchone()[0])
+    return out
+
+
+def recent_pons_alerts(hours=24, limit=20) -> list:
+    cutoff = int(time.time()) - int(hours) * 3600
+    with _lock, _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM pons_queue WHERE status='alerted' AND alerted_at >= ? "
+            "ORDER BY alerted_at DESC LIMIT ?", (cutoff, int(limit)))]
+
+
+def pons_name_cluster(norm_name, since_ts) -> int:
+    """Berapa kali nama token (lowercase, sudah dirapikan) muncul sejak since_ts.
+
+    Dipakai mendeteksi sindikat spam: dev yang meluncurkan koin bernama sama
+    berkali-kali dalam satu jam (mis. 'Wander Forest' 3x dengan simbol beda).
+    """
+    name = " ".join((norm_name or "").lower().split())
+    if not name:
+        return 0
+    with _lock, _conn() as c:
+        rows = c.execute(
+            "SELECT name FROM pons_queue WHERE launch_ts >= ? "
+            "AND name IS NOT NULL AND name <> ''", (int(since_ts),)).fetchall()
+    return sum(1 for r in rows
+               if " ".join(str(r["name"] or "").lower().split()) == name)
+
+
+def pons_deployer_history(deployer, window_sec=3600) -> dict:
+    """Rekam jejak deployer DI RADAR INI saja (bukan registry global).
+
+    Dihitung dalam jendela `window_sec` (default 1 jam) supaya angka yang
+    ditampilkan ke Telegram benar-benar berarti "launch/jam", bukan total
+    sepanjang tabel hidup.
+    """
+    d = (deployer or "").strip().lower()
+    if not d:
+        return {"launches": 0, "alerted": 0}
+    cutoff = int(time.time()) - int(window_sec)
+    with _lock, _conn() as c:
+        launches = c.execute(
+            "SELECT COUNT(*) FROM pons_queue WHERE deployer=? AND launch_ts >= ?",
+            (d, cutoff)).fetchone()[0]
+        alerted = c.execute(
+            "SELECT COUNT(*) FROM pons_queue WHERE deployer=? AND launch_ts >= ? "
+            "AND status='alerted'", (d, cutoff)).fetchone()[0]
+    return {"launches": int(launches), "alerted": int(alerted)}
+
 
 
 

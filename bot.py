@@ -19,7 +19,8 @@ import sys
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
-from sniper import config, db, engine, listener, control_bot, scanner, tracker, clone_guard
+from sniper import (config, db, engine, listener, control_bot, scanner, tracker,
+                    clone_guard, pons_radar)
 from sniper.trader import Trader
 
 ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
@@ -189,6 +190,12 @@ async def main():
     asyncio.create_task(scanner.scanner_loop())  # v16: scanner = sumber sinyal kedua (gabungan)
     asyncio.create_task(tracker.tracker_loop())  # v16.1: tracker insider copy-trade (sumber sinyal ketiga)
     asyncio.create_task(tracker.auto_rotation_loop(notify=notify))  # v16.3: rotasi insider otomatis 24j + scan awal instalasi baru
+    # v17: Radar Pons V2 — ALERT AWAL pre-graduasi. Alert-only: tidak pernah
+    # masuk pipa beli. Real-time ke DM admin; digest publik per jam (opsi C)
+    # hanya bila pons_radar_public=1.
+    pons_radar.bind_notify(notify, public_notify=public_notify)
+    asyncio.create_task(pons_radar.radar_loop())
+    asyncio.create_task(pons_radar.digest_loop())
 
     await notify(control_bot.main_menu_text(), buttons=control_bot.main_menu_buttons())
     runners = [bot.run_until_disconnected()]   # bot BotFather SELALU runner inti

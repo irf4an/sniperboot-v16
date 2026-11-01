@@ -121,8 +121,8 @@ def _openai_text(r):
     return text
 
 # ---------- LLM call (multi-provider) ----------
-def _call(system, user, max_tokens=600):
-    model = db.get("agent_model", str)
+def _call(system, user, max_tokens=600, model=None):
+    model = model or db.get("agent_model", str)
     if config.LLM_PROTOCOL == "anthropic":
         url = config.LLM_BASE_URL or ANTHROPIC_URL
         r = requests.post(url, timeout=45, headers={

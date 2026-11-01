@@ -26,3 +26,4 @@ htmlcov/
 .DS_Store
 *.tmp
 hoodsniper.db.bak*
+hoodsniper.db.archive-*
