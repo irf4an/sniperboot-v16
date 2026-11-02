@@ -97,6 +97,11 @@ def _btn_data(btn):
     return d.decode() if isinstance(d, bytes) else str(d)
 
 
+def _btn_label(btn):
+    """Label tombol — stub Button menyimpan teks di atribut `text`."""
+    return getattr(btn, "text", "") or ""
+
+
 def _all_btns(buttons):
     return [b for row in buttons for b in row]
 
@@ -159,7 +164,7 @@ def test_scan_address_flow():
         text, buttons = ev.responded[0], ev.edited[0][1]
         assert winner[:10] in text, text
         btn = _find_btn(buttons, "insconf:")
-        assert btn is not None, [cb._btn_label(b) for b in _all_btns(buttons)]
+        assert btn is not None, [_btn_label(b) for b in _all_btns(buttons)]
         assert winner in _btn_data(btn), btn.data
         assert winner not in db.get_active_insiders()   # belum ditambah
         assert db.list_insiders() == [] or all(
@@ -211,17 +216,17 @@ def test_insider_screen_pagination():
         t, b = cb.insider_screen_panel(0)
         toggles = [b_ for b_ in _all_btns(b) if _btn_data(b_).startswith("instoggle:")]
         assert len(toggles) == 10, len(toggles)
-        assert _find_btn(b, "inspagecur") and "1/2" in cb._btn_label(_find_btn(b, "inspagecur")), b
+        assert _find_btn(b, "inspagecur") and "1/2" in _btn_label(_find_btn(b, "inspagecur")), b
         assert _find_btn(b, "inspage:1"), "tombol ▶ harus ada"
 
         t2, b2 = cb.insider_screen_panel(1)
         t2_toggles = [b_ for b_ in _all_btns(b2)
                       if _btn_data(b_).startswith("instoggle:")]
         assert len(t2_toggles) == 5, len(t2_toggles)
-        assert _find_btn(b2, "inspagecur") and "2/2" in cb._btn_label(_find_btn(b2, "inspagecur")), b2
+        assert _find_btn(b2, "inspagecur") and "2/2" in _btn_label(_find_btn(b2, "inspagecur")), b2
         assert _find_btn(b2, "inspage:0"), "tombol ◀ harus ada"
 
-        nav = "\n".join(cb._btn_label(b_) for b_ in _all_btns(b))
+        nav = "\n".join(_btn_label(b_) for b_ in _all_btns(b))
         assert "« Sources" in nav and "« Menu" in nav, nav
         assert "14/15" in t, t                           # aktif/total
         assert "• w00 ·" in t and "• w09 ·" in t, t      # urutan win_count
@@ -242,7 +247,7 @@ def test_source_button_and_next_page_data():
         asyncio.run(cb._route(ev, "sources"))
         btn = _find_btn(ev.edited[0][1], "ins")
         assert btn is not None, ev.edited[0][1]
-        assert "Insider" in cb._btn_label(btn), cb._btn_label(btn)
+        assert "Insider" in _btn_label(btn), _btn_label(btn)
 
         for i in range(11):
             # mulai dari 1: index 0 = zero address (ditolak guard non-trader)
@@ -250,7 +255,7 @@ def test_source_button_and_next_page_data():
         ev2 = _FakeEvent()
         asyncio.run(cb._route(ev2, "inspage:1"))
         t, b = ev2.edited[0]
-        assert "2/2" in "\n".join(cb._btn_label(b_) for b_ in _all_btns(b)), t
+        assert "2/2" in "\n".join(_btn_label(b_) for b_ in _all_btns(b)), t
         rows = db.list_insiders()
         assert rows[10]["address"] == "0x" + "c0" * 16 + f"{11:08x}"  # paling bawah (win_count=1)
         print("PASS sources tombol Insider + inspage konsisten urutan DB")
@@ -305,8 +310,8 @@ def test_reset_confirm_flow():
         yes = _find_btn(b, "insreset:yes")
         no = _find_btn(b, "insreset:no")
         assert yes and no, b
-        assert "nonaktifkan" in cb._btn_label(yes).lower(), cb._btn_label(yes)
-        assert "Batal" in cb._btn_label(no), cb._btn_label(no)
+        assert "nonaktifkan" in _btn_label(yes).lower(), _btn_label(yes)
+        assert "Batal" in _btn_label(no), _btn_label(no)
         assert addr in db.get_active_insiders()
 
         # Batal → tidak mengubah apa pun
@@ -394,7 +399,7 @@ def test_wallet_rows_and_last_seen():
         t, b = cb.insider_screen_panel(0)
         assert addr[:6] in t or "0xe" in t, t
         toggle = _find_btn(b, f"instoggle:0:{addr}")
-        assert toggle is not None and cb._btn_label(toggle) == "🚫", toggle
+        assert toggle is not None and _btn_label(toggle) == "🚫", toggle
         # Test Log Beli Insider panel
         db.record_insider_buy("0x" + "1" * 40, addr, symbol="RAID", mcap=394700, liq=56600)
         db.record_insider_buy("0x" + "1" * 40, "0x" + "f" * 40, symbol="RAID", mcap=395000, liq=57000)

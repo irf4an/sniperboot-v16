@@ -91,15 +91,6 @@ def liq_usd_or_none(pair):
 # Data jejak sosmed diambil dari Dexscreener pair["info"]:
 #   info.websites = [{"label","url"}]
 #   info.socials  = [{"type","url"}]   type: twitter/x, telegram, discord, ...
-SOCIAL_MODE_LABEL = {
-    "off":   "Off (semua lolos)",
-    "any":   "Any (min 1 sosmed)",
-    "x":     "Punya X/Twitter",
-    "tg":    "Punya Telegram",
-    "x_tg":  "Punya X + Telegram",
-    "web":   "Punya Website",
-    "count": "Min N sosmed",
-}
 
 
 def socials_of(pair) -> dict:

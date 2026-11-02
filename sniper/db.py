@@ -71,9 +71,6 @@ def init():
             ca TEXT, symbol TEXT, role TEXT, action TEXT,
             conviction INTEGER, size_mult REAL,
             reason TEXT, risks TEXT, outcome TEXT, ts INTEGER)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS blacklist(
-            caller_id INTEGER PRIMARY KEY, caller_name TEXT,
-            reason TEXT, ts INTEGER)""")
         c.execute("""CREATE TABLE IF NOT EXISTS lessons(
             id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, ts INTEGER)""")
         c.execute("""CREATE TABLE IF NOT EXISTS wallets(
@@ -412,16 +409,6 @@ def recent_lessons(n=5):
         return [dict(r) for r in c.execute("SELECT * FROM lessons ORDER BY id DESC LIMIT ?", (n,))]
 
 
-def source_stats(name):
-    with _lock, _conn() as c:
-        r = c.execute("""SELECT COUNT(*) AS buys,
-            SUM(status='closed_tp2') AS full_tp,
-            SUM(tp1_done) AS hit_tp1,
-            SUM(status='closed_sl') AS stopped
-            FROM positions WHERE source_name=?""", (name,)).fetchone()
-        return dict(r)
-
-
 def closed_positions_with_decisions(n=20):
     with _lock, _conn() as c:
         rows = c.execute("""SELECT p.symbol, p.status, p.usd_spent, p.realized_eth,
@@ -484,30 +471,6 @@ def recap_data(since_ts: int):
             "closed": closed, "open": open_n,
             "top_caller": dict(top) if top and top["caller_name"] else None,
         }
-
-
-# ---------- blacklist caller (kekuasaan Mata) ----------
-def is_blacklisted(caller_id):
-    if not caller_id:
-        return False
-    with _lock, _conn() as c:
-        return c.execute("SELECT 1 FROM blacklist WHERE caller_id=?", (caller_id,)).fetchone() is not None
-
-
-def add_blacklist(caller_id, caller_name, reason):
-    with _lock, _conn() as c:
-        c.execute("INSERT OR REPLACE INTO blacklist(caller_id,caller_name,reason,ts) VALUES(?,?,?,?)",
-                  (caller_id, caller_name, reason, int(time.time())))
-
-
-def remove_blacklist(caller_id):
-    with _lock, _conn() as c:
-        c.execute("DELETE FROM blacklist WHERE caller_id=?", (caller_id,))
-
-
-def list_blacklist():
-    with _lock, _conn() as c:
-        return [dict(r) for r in c.execute("SELECT * FROM blacklist ORDER BY ts DESC")]
 
 
 # ======================= PENDING POOL RETRY QUEUE =======================
@@ -828,37 +791,6 @@ def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
         c.execute("DELETE FROM insider_buys WHERE ts < ?", (now - 86400,))
 
 
-def purge_non_trader_wallets():
-    """Hapus baris insider_buys & insider_wallets milik alamat burn/zero.
-
-    Operasi sekali-jalan untuk membersihkan data lama yang terlanjur
-    tercemar (0x…dead pernah mengisi 18.007 baris = 60% tabel).
-    Return (rows_deleted, wallets_deleted).
-    """
-    with _lock, _conn() as c:
-        _init_insider_buys(c)
-        _init_insider_wallets(c)
-        bad_buys = []
-        bad_wallets = []
-        for r in c.execute("SELECT DISTINCT wallet FROM insider_buys"):
-            w = (r["wallet"] or "").strip().lower()
-            if w and not is_trackable_wallet(w):
-                bad_buys.append(w)
-        for r in c.execute("SELECT address FROM insider_wallets"):
-            w = (r["address"] or "").strip().lower()
-            if w and not is_trackable_wallet(w):
-                bad_wallets.append(w)
-        n_buys = 0
-        for w in bad_buys:
-            cur = c.execute("DELETE FROM insider_buys WHERE wallet=?", (w,))
-            n_buys += cur.rowcount or 0
-        n_wal = 0
-        for w in bad_wallets:
-            cur = c.execute("DELETE FROM insider_wallets WHERE address=?", (w,))
-            n_wal += cur.rowcount or 0
-        return n_buys, n_wal, bad_wallets
-
-
 def top_insider_buys(window_sec=3600, limit=10, now=None):
     now_i = int(now if now is not None else time.time())
     cutoff = now_i - max(60, int(window_sec or 3600))
@@ -1041,27 +973,6 @@ _PONS_UPDATABLE = {"symbol", "name", "total_supply", "status", "score",
                    "block_buy", "progress", "volume_usd", "trade_count",
                    "market_cap_usd", "raised_eth", "creator_tax_bps", "socials",
                    "queued_at"}
-
-
-def add_pons_token(ca, deployer=None, curve=None, launch_block=0, launch_ts=0) -> bool:
-    """Catat satu event TokenLaunched Pons V2.
-
-    Return True bila benar-benar baru (INSERT berhasil), False bila CA sudah
-    pernah tercatat. Dedup di level PRIMARY KEY — event yang terbaca ulang
-    karena watermark mundur tidak akan menggandakan baris.
-    """
-    ca = (ca or "").strip().lower()
-    if not ca:
-        return False
-    with _lock, _conn() as c:
-        cur = c.execute(
-            """INSERT OR IGNORE INTO pons_queue
-               (ca, deployer, curve, launch_block, launch_ts, status)
-               VALUES (?,?,?,?,?, 'new')""",
-            (ca, (deployer or "").strip().lower() or None,
-             (curve or "").strip().lower() or None,
-             int(launch_block or 0), int(launch_ts or 0)))
-        return cur.rowcount > 0
 
 
 def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,

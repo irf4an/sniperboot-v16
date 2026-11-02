@@ -36,7 +36,6 @@ _S.headers.update({"User-Agent": "hoodsniper/1.0"})
 
 # --- Robinhood Chain mainnet (chainId 4663) ---
 # Alamat kontrak sumber event & quote asset utama di chain ini.
-V3_FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
 V4_POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951"
 WETH_ADDR = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
 USDG_ADDR = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
@@ -45,7 +44,6 @@ QUOTE_ASSETS = {WETH_ADDR.lower(), USDG_ADDR.lower()}
 # untuk penilaian pasangan ia berkedudukan sama seperti WETH (quote).
 NATIVE_SENTINEL = "0x0000000000000000000000000000000000000000"
 QUOTE_ASSETS_V4 = QUOTE_ASSETS | {NATIVE_SENTINEL}
-POOL_CREATED_SIG = "PoolCreated(address,address,uint24,int24,address)"
 V4_INITIALIZE_SIG = "Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)"
 MAX_BLOCKS_PER_CYCLE = 2000
 
@@ -107,27 +105,6 @@ def _topic_addr(topic) -> str:
     return "0x" + h[-40:]
 
 
-def parse_pool_created_log(log):
-    """Dari log PoolCreated → CA token non-quote (yang menarik buat di-scan).
-
-    PoolCreated(address token0, address token1, uint24, int24, address pool):
-    token0/token1 ada di topics[1]/topics[2]. Kalau salah satu sisi adalah
-    quote asset (WETH/USDG), sisi lainlah kandidatnya. Kedua sisi quote atau
-    kedua sisi bukan quote → None (tidak jelas mana yang mau di-scan).
-    Fungsi murni — bisa di-unit-test tanpa jaringan.
-    """
-    try:
-        topics = log.get("topics") if isinstance(log, dict) else getattr(log, "topics", None)
-        if not topics or len(topics) < 3:
-            return None
-        t0 = _topic_addr(topics[1])
-        t1 = _topic_addr(topics[2])
-    except Exception:
-        return None
-    non_quote = [t for t in (t0, t1) if t not in QUOTE_ASSETS]
-    return non_quote[0] if len(non_quote) == 1 else None
-
-
 def parse_v4_initialize_log(log):
     """Dari log Initialize PoolManager Uniswap v4 → CA token non-quote.
 
@@ -148,31 +125,6 @@ def parse_v4_initialize_log(log):
         return None
     non_quote = [t for t in (c0, c1) if t not in QUOTE_ASSETS_V4]
     return non_quote[0] if len(non_quote) == 1 else None
-
-
-def parse_pons_launched_log(log):
-    """Dari log TokenLaunched Pons V2 → CA token yang baru diluncurkan.
-
-    TokenLaunched(address,address,address,address,uint256,uint256):
-    topics[1] adalah token itu sendiri (topics[2]=kurva bonding,
-    topics[3]=deployer), jadi kandidatnya langsung si token — tanpa
-    menebak pasangan. Token di sumber ini lahir di bonding curve dan
-    BARU punya pair DEX setelah graduate; tahap pengumpulan memang
-    hanya menyerahkan kandidat yang sudah punya pair (best_pair),
-    jadi token pra-graduasi tidak terbakar dedupe — ia ditahan di
-    tahap kumpul dan dicoba lagi siklus berikutnya.
-    Fungsi murni — bisa di-unit-test tanpa jaringan.
-    """
-    try:
-        topics = log.get("topics") if isinstance(log, dict) else getattr(log, "topics", None)
-        if not topics or len(topics) < 2:
-            return None
-        token = _topic_addr(topics[1])
-    except Exception:
-        return None
-    if not token or token in QUOTE_ASSETS:
-        return None
-    return token
 
 
 def _fetch_event_candidates(w3, label, address, sig, watermark_key, parser) -> list:
@@ -221,15 +173,6 @@ def _fetch_event_candidates(w3, label, address, sig, watermark_key, parser) -> l
     except Exception as e:
         print(f"[scanner] {label} gagal (diabaikan): {e}")
         return []
-
-
-def fetch_factory_candidates(w3) -> list:
-    """CA token dari event PoolCreated factory v3 sejak watermark terakhir
-    (setting scanner_last_block). Pembungkus tipis _fetch_event_candidates —
-    dipertahankan sebagai API lama (dipakai test & panggilan eksternal)."""
-    return _fetch_event_candidates(
-        w3, "factory", V3_FACTORY, POOL_CREATED_SIG,
-        "scanner_last_block", parse_pool_created_log)
 
 
 # Hanya Uniswap v4 (venue meme utama chain ini, ~96%+).

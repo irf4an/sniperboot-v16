@@ -1,8 +1,8 @@
 """📡 Radar Pons V2 — EARLY ALERT ONLY (tidak pernah membeli).
 
-Membaca event `TokenLaunched` dari factory Pons V2 di Robinhood Chain
-(chainId 4663), menyaring sampah, lalu mengirim ALERT AWAL ke DM admin
-SEBELUM token graduate ke Uniswap v4.
+Membaca kandidat dari API kurva Pons (token yang sudah tembus ambang
+`pons_min_progress`), menyaring sampah, lalu mengirim ALERT PRA-GRADUASI
+ke DM admin SEBELUM token graduate ke Uniswap v4.
 
 ════════════════════════ BATAS KERAS ════════════════════════
 Modul ini TIDAK PERNAH memanggil:
@@ -11,15 +11,16 @@ Modul ini TIDAK PERNAH memanggil:
     • db.open_position() / tabel positions
 Token di bonding curve BELUM punya pool v4 — kalau modul ini ikut pipa
 beli, hasilnya membeli koin tanpa likuiditas. Karena itu radar punya
-tabel sendiri (`pons_queue`), watermark sendiri (`pons_last_block`),
-toggle sendiri (`pons_radar_on`), dan loop sendiri.
+tabel sendiri (`pons_queue`), toggle sendiri (`pons_radar_on`), dan
+loop sendiri.
 
 Alur satu siklus:
-    getLogs TokenLaunched  (watermark pons_last_block)
-      → INSERT OR IGNORE ke pons_queue        (dedup CA di PRIMARY KEY)
-      → enrich paralel via RPC                (name / symbol / totalSupply)
-      → skor heuristik                        (gibberish, klaster nama, dev)
-      → tier LLM                              (verdict + skor) bila diaktifkan
+    GET /api/launches?stage=curve&sort=progress
+      → saring progress ≥ pons_min_progress
+      → INSERT/UPDATE ke pons_queue          (dedup CA di PRIMARY KEY)
+      → enrich paralel via RPC               (name / symbol / totalSupply)
+      → skor heuristik                       (gibberish, klaster nama, dev)
+      → tier LLM                             (verdict + skor) bila diaktifkan
       → skor ≥ pons_alert_min_score & cap/jam belum penuh
       → alert Telegram ke DM admin
 
@@ -36,9 +37,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import agent, config, db
 
-PONS_V2_FACTORY = "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e"
-PONS_LAUNCHED_SIG = "TokenLaunched(address,address,address,address,uint256,uint256)"
-MAX_BLOCKS_PER_CYCLE = 2000
 NAME_CLUSTER_WINDOW_SEC = 3600
 _VOWELS = set("aeiou")
 
@@ -106,47 +104,6 @@ async def _send_alert(text, buttons=None):
     except Exception as e:
         print(f"[pons-radar] gagal kirim alert: {e}")
         return False
-
-
-# ==================== parser event (fungsi murni) ====================
-def _topic_addr(topic) -> str:
-    """Ambil 20 byte terakhir dari sebuah topic log → alamat huruf kecil."""
-    if hasattr(topic, "hex"):
-        h = topic.hex()
-    elif isinstance(topic, (bytes, bytearray)):
-        h = topic.hex()
-    else:
-        h = str(topic)
-    h = h.lower()
-    if not h.startswith("0x"):
-        h = "0x" + h
-    return "0x" + h[-40:]
-
-
-def parse_launch_log(log) -> dict | None:
-    """TokenLaunched(token, curve, deployer, ...) → dict kandidat.
-
-    topics[1]=token, topics[2]=bonding curve, topics[3]=deployer.
-    Fungsi murni (tanpa jaringan) supaya bisa di-unit-test.
-    """
-    try:
-        topics = log.get("topics") if isinstance(log, dict) else getattr(log, "topics", None)
-        if not topics or len(topics) < 4:
-            return None
-        token = _topic_addr(topics[1])
-        curve = _topic_addr(topics[2])
-        deployer = _topic_addr(topics[3])
-        if isinstance(log, dict):
-            block = int(log.get("blockNumber") or 0)
-        else:
-            block = int(getattr(log, "blockNumber", 0) or 0)
-    except Exception:
-        return None
-    if not token or token == "0x" + "0" * 40:
-        return None
-    if token == curve or token == deployer:
-        return None
-    return {"ca": token, "curve": curve, "deployer": deployer, "block": block}
 
 
 # ==================== heuristik (fungsi murni) ====================
@@ -408,66 +365,6 @@ def _w3():
         except Exception as e:
             print(f"[pons-radar] web3 tidak tersedia: {e}")
             return None
-
-
-def scan_new_launches() -> int:
-    """Baca TokenLaunched baru sejak watermark → pons_queue.
-
-    Watermark pertama kali (0) dilompatkan ke head: radar tidak memindai
-    riwayat chain dari genesis. Return jumlah baris BARU.
-    """
-    w3 = _w3()
-    if w3 is None:
-        return 0
-    try:
-        from web3 import Web3
-        latest = int(w3.eth.block_number)
-        last = int(db.get("pons_last_block", int))
-        if last <= 0:
-            db.set_("pons_last_block", str(latest))
-            print(f"[pons-radar] watermark dimulai dari blok {latest}")
-            return 0
-        from_block = last + 1
-        if from_block > latest:
-            return 0
-        to_block = min(latest, from_block + MAX_BLOCKS_PER_CYCLE - 1)
-        topic0 = Web3.keccak(text=PONS_LAUNCHED_SIG).hex()
-        if not topic0.startswith("0x"):
-            topic0 = "0x" + topic0
-        logs = w3.eth.get_logs({
-            "address": Web3.to_checksum_address(PONS_V2_FACTORY),
-            "topics": [topic0],
-            "fromBlock": from_block,
-            "toBlock": to_block,
-        })
-    except Exception as e:
-        print(f"[pons-radar] getLogs gagal (diabaikan): {e}")
-        return 0
-
-    head_ts = None
-    new_rows = 0
-    for log in logs:
-        rec = parse_launch_log(log)
-        if not rec:
-            continue
-        ts = 0
-        try:
-            ts = int(w3.eth.get_block(rec["block"])["timestamp"])
-        except Exception:
-            if head_ts is None:
-                try:
-                    head_ts = int(w3.eth.get_block(to_block)["timestamp"])
-                except Exception:
-                    head_ts = int(time.time())
-            ts = head_ts
-        if db.add_pons_token(rec["ca"], deployer=rec["deployer"],
-                             curve=rec["curve"], launch_block=rec["block"],
-                             launch_ts=ts):
-            new_rows += 1
-    db.set_("pons_last_block", str(to_block))
-    if new_rows:
-        print(f"[pons-radar] {new_rows} launch baru (blok {from_block}-{to_block})")
-    return new_rows
 
 
 _ERC20_ABI = [

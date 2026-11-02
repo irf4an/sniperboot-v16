@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sniper import agent
-from sniper.listener import _extract_ca_strict, _trusted_meta_value
+from sniper.listener import _extract_ca_strict
 
 
 def test_check_staleness():
@@ -63,16 +63,6 @@ def test_extract_ca_strict():
     assert _extract_ca_strict("") == []
     assert _extract_ca_strict(None) == []
     print("PASS _extract_ca_strict")
-
-
-def test_trusted_meta_value():
-    assert _trusted_meta_value("12345") == "12345"
-    assert _trusted_meta_value("-3.14") == "-3.14"
-    # teks bebas (promosi/instruksi) ditolak
-    assert _trusted_meta_value("BUY NOW kenanga") is None
-    assert _trusted_meta_value("http://x") is None
-    assert _trusted_meta_value(None) is None
-    print("PASS _trusted_meta_value")
 
 
 def test_agent_decision_text_sanitized():
@@ -165,7 +155,6 @@ if __name__ == "__main__":
     test_check_staleness()
     test_sanitize_text()
     test_extract_ca_strict()
-    test_trusted_meta_value()
     test_agent_decision_text_sanitized()
     test_sell_lock_exclusivity()
     test_poll_seconds_helper()

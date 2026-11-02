@@ -558,28 +558,6 @@ def _encode_v4_input(actions: bytes, params: list) -> bytes:
     return encode(["bytes", "bytes[]"], [bytes(actions), [bytes(p) for p in params]])
 
 
-def decode_v4_input(blob: bytes):
-    """D2: inputs[0] (abi.encode(["bytes","bytes[]"])) → (actions, params).
-    actions = bytes opcode murni; params = list bytes payload per action.
-    """
-    from eth_abi import decode
-    actions, params = decode(["bytes", "bytes[]"], HexBytes(blob))
-    return bytes(actions), [bytes(p) for p in params]
-
-
-def decode_actions(actions: bytes):
-    """Bolak-balik utk unit test: `actions` (OPCODE MURNI, tanpa payload —
-    payload ada di array params terpisah, lihat decode_v4_input) →
-    list of bytes (1 opcode per elemen)."""
-    KNOWN = {ACT_SWAP_EXACT_IN_SINGLE, ACT_SETTLE_ALL, ACT_TAKE_ALL}
-    out = []
-    for b in bytes(actions):
-        if b not in KNOWN:
-            raise ValueError(f"action tak dikenal: {hex(b)}")
-        out.append(bytes([b]))
-    return out
-
-
 def eth_abi_encode(vals, types=None):
     """Shorthand encode dengan tipe implisit dari standar v4."""
     from eth_abi import encode
@@ -619,7 +597,6 @@ UNIVERSAL_ROUTER_ABI = [
 
 # Permit2.approve(token, spender, amount(uint160), expiration(uint48))
 # selector 0x87517c45 (D3: allowOwner TIDAK ADA di Permit2)
-SEL_PERMIT2_APPROVE = "0x87517c45"
 PERMIT2_ABI = [
     {"name": "approve", "type": "function", "stateMutability": "nonpayable",
      "inputs": [{"name": "token", "type": "address"},
@@ -661,5 +638,3 @@ def ensure_v4_sell_approval(token_addr, w3, amount_raw, deadline):
     ]
 
 
-def is_v4_pair(pair_address) -> bool:
-    return _is_pool_id(pair_address)

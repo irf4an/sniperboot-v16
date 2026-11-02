@@ -1,6 +1,6 @@
 """Unit test Radar Pons V2 (alert-only).
 
-Fokus: bagian MURNI (parser, heuristik, komposisi teks) + lapisan DB +
+Fokus: bagian MURNI (heuristik, komposisi teks) + lapisan DB +
 satu putaran `process_candidates` dengan RPC/LLM dipalsukan.
 
 Tidak ada test yang menyentuh jaringan. Yang WAJIB dijaga: radar tidak
@@ -17,41 +17,6 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sniper import config, db, pons_radar
-
-
-def _topic(addr):
-    return bytes.fromhex("0" * 24 + addr.replace("0x", ""))
-
-
-class TestParser(unittest.TestCase):
-    def test_parse_valid_log(self):
-        log = {
-            "topics": [_topic("11" * 32), _topic("aa" * 20),
-                       _topic("bb" * 20), _topic("cc" * 20)],
-            "blockNumber": 123,
-        }
-        rec = pons_radar.parse_launch_log(log)
-        self.assertIsNotNone(rec)
-        self.assertEqual(rec["ca"], "0x" + "aa" * 20)
-        self.assertEqual(rec["curve"], "0x" + "bb" * 20)
-        self.assertEqual(rec["deployer"], "0x" + "cc" * 20)
-        self.assertEqual(rec["block"], 123)
-
-    def test_parse_rejects_short_topics(self):
-        self.assertIsNone(pons_radar.parse_launch_log({"topics": [_topic("11" * 32)]}))
-        self.assertIsNone(pons_radar.parse_launch_log({}))
-
-    def test_parse_rejects_zero_token(self):
-        log = {"topics": [_topic("11" * 32), _topic("00" * 20),
-                          _topic("bb" * 20), _topic("cc" * 20)],
-               "blockNumber": 1}
-        self.assertIsNone(pons_radar.parse_launch_log(log))
-
-    def test_parse_rejects_token_equal_deployer(self):
-        log = {"topics": [_topic("11" * 32), _topic("aa" * 20),
-                          _topic("bb" * 20), _topic("aa" * 20)],
-               "blockNumber": 1}
-        self.assertIsNone(pons_radar.parse_launch_log(log))
 
 
 class TestHeuristic(unittest.TestCase):
@@ -137,10 +102,10 @@ class TestDBLayer(unittest.TestCase):
     def test_add_dedup_and_pending(self):
         now = int(time.time())
         ca = "0x" + "aa" * 20
-        self.assertTrue(db.add_pons_token(ca, deployer="0x" + "bb" * 20,
+        self.assertTrue(db.upsert_pons_curve_candidate(ca, deployer="0x" + "bb" * 20,
                                           curve="0x" + "cc" * 20,
                                           launch_block=10, launch_ts=now))
-        self.assertFalse(db.add_pons_token(ca, deployer="0x" + "bb" * 20,
+        self.assertFalse(db.upsert_pons_curve_candidate(ca, deployer="0x" + "bb" * 20,
                                            launch_block=10, launch_ts=now))
         pending = db.get_pons_pending()
         self.assertEqual(len(pending), 1)
@@ -159,8 +124,13 @@ class TestDBLayer(unittest.TestCase):
     def test_reject_and_expire(self):
         now = int(time.time())
         ca1, ca2 = "0x" + "11" * 20, "0x" + "22" * 20
-        db.add_pons_token(ca1, launch_ts=now)
-        db.add_pons_token(ca2, launch_ts=now - 7200)
+        db.upsert_pons_curve_candidate(ca1, launch_ts=now)
+        db.upsert_pons_curve_candidate(ca2, launch_ts=now)
+        # TTL dihitung dari queued_at (saat kandidat masuk antrean), bukan
+        # launch_ts — token yang butuh berjam-jam mencapai ambang tetap hidup.
+        with db._lock, db._conn() as c:
+            c.execute("UPDATE pons_queue SET queued_at=? WHERE ca=?",
+                      (now - 7200, ca2))
         db.reject_pons(ca1, "skor rendah", score=10)
         self.assertEqual(db.pons_stats()["rejected"], 1)
         expired = db.expire_pons_queue(max_age_sec=3600)
@@ -171,7 +141,7 @@ class TestDBLayer(unittest.TestCase):
         now = int(time.time())
         dep = "0x" + "dd" * 20
         for i in range(3):
-            db.add_pons_token("0x" + f"{i:02x}" * 20, deployer=dep,
+            db.upsert_pons_curve_candidate("0x" + f"{i:02x}" * 20, deployer=dep,
                               launch_ts=now - i)
         db.update_pons_token("0x" + "00" * 20, name="Wander Forest")
         db.update_pons_token("0x" + "01" * 20, name="Wander Forest")
@@ -202,7 +172,7 @@ class TestProcessCandidates(unittest.TestCase):
         out = []
         for i in range(n):
             ca = "0x" + f"{i + 1:02x}" * 20
-            db.add_pons_token(ca, deployer="0x" + f"{i + 50:02x}" * 20,
+            db.upsert_pons_curve_candidate(ca, deployer="0x" + f"{i + 50:02x}" * 20,
                               launch_ts=now - 30)
             out.append({"ca": ca, "deployer": "0x" + f"{i + 50:02x}" * 20,
                         "launch_ts": now - 30, "launch_block": 1000 + i})
@@ -294,15 +264,15 @@ class TestVetoBridge(unittest.TestCase):
         now = int(time.time())
         for i in range(n):
             ca = "0x" + f"{i + 1:02x}" * 20
-            db.add_pons_token(ca, deployer="0x" + f"{i + 50:02x}" * 20,
+            db.upsert_pons_curve_candidate(ca, deployer="0x" + f"{i + 50:02x}" * 20,
                               launch_ts=now - ts_offset)
         return db.get_pons_pending()
 
     def test_block_buy_flag_semantics(self):
         ca_ok = "0x" + "aa" * 20
         ca_no = "0x" + "bb" * 20
-        db.add_pons_token(ca_ok, launch_ts=int(time.time()))
-        db.add_pons_token(ca_no, launch_ts=int(time.time()))
+        db.upsert_pons_curve_candidate(ca_ok, launch_ts=int(time.time()))
+        db.upsert_pons_curve_candidate(ca_no, launch_ts=int(time.time()))
         db.reject_pons(ca_ok, "LLM BUANG: sindikat", block_buy=True)
         db.reject_pons(ca_no, "cap alert per jam penuh", block_buy=False)
         self.assertEqual(db.get_pons_blocked_cas(), {ca_ok})
@@ -334,7 +304,7 @@ class TestVetoBridge(unittest.TestCase):
 
     def test_is_blacklisted_memory_and_refresh(self):
         ca = "0x" + "cc" * 20
-        db.add_pons_token(ca, launch_ts=int(time.time()))
+        db.upsert_pons_curve_candidate(ca, launch_ts=int(time.time()))
         db.reject_pons(ca, "skor rendah", block_buy=True)
         pons_radar._blacklist = set()
         pons_radar._blacklist_ts = 0.0

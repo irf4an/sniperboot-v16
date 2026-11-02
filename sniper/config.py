@@ -56,7 +56,6 @@ EXPLORER_URL   = os.getenv("EXPLORER_URL", "https://robinhoodchain.blockscout.co
 LLM_PROTOCOL = os.getenv("LLM_PROTOCOL", "anthropic").lower()
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 LLM_API_KEY  = os.getenv("LLM_API_KEY", "") or os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_API_KEY = LLM_API_KEY  # alias backwards-compat
 
 # ---- Wallet (multi-wallet via bot). Isi WALLET_SECRET utk enkripsi key di DB. ----
 WALLET_SECRET = os.getenv("WALLET_SECRET", "")
@@ -123,7 +122,6 @@ SETTING_DEFAULTS = {
     "agent_max_drift": "0.50",
     # model yang tersedia di gateway 9router (claude-haiku-4-5 sudah 404)
     "agent_model":    "cmc/deepseek/deepseek-v4-flash",
-    "agent_size_mult_max": "2",
     "agent_review_min": "10",
     "agent_auto_insting": "1",
     # ---- 🔭 Scanner (v16 gabungan): sumber sinyal KEDUA di samping listener grup.
@@ -144,7 +142,6 @@ SETTING_DEFAULTS = {
     "scanner_min_vol_h1":    "1000",
     "scanner_min_txns_h1":   "20",
     "scanner_max_age_min":   "5",
-    "scanner_max_h1_pump":   "150",
     "scanner_max_per_hour":  "0",
     "scanner_factory_on":    "1",
     "scanner_last_block":    "0",
@@ -177,7 +174,6 @@ SETTING_DEFAULTS = {
     "goldilocks_min_mcap":        "5000.0",
     "goldilocks_max_dev_pct":     "0.04",
     "goldilocks_max_top10_pct":   "0.30",
-    "goldilocks_max_slippage":    "0.25",
     "goldilocks_tp1":             "0.35",
     "goldilocks_tp2":             "0.80",
     # ---- 🤖 Sybil Cluster Guard: anti wash-trading dev bot (v16.9) ----
@@ -250,7 +246,6 @@ SETTING_LABELS = {
     "social_filter":  "🌐 Filter sosmed",
     "social_min_count":"🌐 Min jumlah sosmed (mode count)",
     "social_fail_closed":"🌐 Skip kalau sosmed kosong (1/0)",
-    "agent_size_mult_max": "🧠 Max size multiplier agent",
     "agent_review_min": "🧠 Interval review agent (menit)",
     "scanner_on":            "🔭 Scanner: analisa semua coin (1=ON) — sumber sinyal kedua",
     "scanner_interval_sec":  "🔭 Scanner: interval siklus (dtk)",
@@ -260,7 +255,6 @@ SETTING_LABELS = {
     "scanner_min_vol_h1":    "🔭 Scanner: min volume 1 jam (USD)",
     "scanner_min_txns_h1":   "🔭 Scanner: min transaksi 1 jam",
     "scanner_max_age_min":   "🔭 Scanner: maks umur pair (menit, 0=abaikan)",
-    "scanner_max_h1_pump":   "🔭 Scanner: pagar anti-pucuk, maks h1 pump (%)",
     "scanner_max_per_hour":  "🔭 Scanner: maks BUY per jam (0 = unlimited)",
     "scanner_factory_on":    "🔭 Scanner: sumber event factory v3 (1=ON)",
     "scanner_batch_max":     "🔭 Scanner: maks koin diambil per siklus (2)",
@@ -276,7 +270,6 @@ SETTING_LABELS = {
     "goldilocks_min_mcap":        "⚡ Goldilocks: min mcap (USD)",
     "goldilocks_max_dev_pct":     "⚡ Goldilocks: maks dev (rasio 0-1)",
     "goldilocks_max_top10_pct":   "⚡ Goldilocks: maks top10 (rasio 0-1)",
-    "goldilocks_max_slippage":    "⚡ Goldilocks: maks slippage quote",
     "goldilocks_tp1":             "⚡ Goldilocks: TP1 (0.35 = +35%)",
     "goldilocks_tp2":             "⚡ Goldilocks: TP2 (0.80 = +80%)",
     "sybil_cluster_guard_on":     "🤖 Sybil Guard: blokir klaster wash-trading dev bot (1/0)",
@@ -294,8 +287,6 @@ SETTING_LABELS = {
     "pons_radar_public":         "📣 Radar Pons: digest ke channel publik (1/0)",
     "userbot_enabled":       "📡 Userbot Telegram alpha groups (1/0, default 0=off)",
 }
-
-SETTING_DESCRIPTIONS = SETTING_LABELS
 
 
 def validate():

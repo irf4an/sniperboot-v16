@@ -188,14 +188,6 @@ def _repair_truncated(s):
     return s
 
 
-def _clamp(v, lo, hi, default):
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return default
-    return max(lo, min(hi, v))
-
-
 # ---------- sanitasi: pagar anti prompt-injection ----------
 _CTRL_RE = __import__("re").compile(r"[\x00-\x1f\x7f]")
 

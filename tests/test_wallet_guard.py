@@ -10,7 +10,6 @@ Lingkup:
   3. record_insider_buy mengabaikan wallet burn.
   4. top_insider_buys menyaring baris lama (yang ditulis lewat SQL langsung).
   5. add_insider_wallet menolak merekrut burn address.
-  6. purge_non_trader_wallets membersihkan baris & wallet lama.
 """
 import os
 import sys
@@ -109,40 +108,9 @@ def test_add_wallet_refuses_burn():
         config.DB_PATH = old
 
 
-def test_purge():
-    path, old = _fresh_db()
-    try:
-        now = int(time.time())
-        for _ in range(10):
-            _raw_insert(CA, BURN, now - 3)
-        _raw_insert(CA, GOOD, now - 4)
-        import sqlite3
-        db.get_active_insiders()   # pastikan tabel insider_wallets sudah dibuat
-        c = sqlite3.connect(config.DB_PATH)
-        c.execute("INSERT OR IGNORE INTO insider_wallets(address,label,enabled) "
-                  "VALUES(?,?,1)", (BURN, "auto_rotate"))
-        c.commit()
-        c.close()
-
-        n_buys, n_wal, bad = db.purge_non_trader_wallets()
-        assert n_buys == 10 and n_wal == 1, (n_buys, n_wal, bad)
-        assert BURN in bad
-
-        c = sqlite3.connect(config.DB_PATH)
-        left = c.execute("SELECT COUNT(*) FROM insider_buys").fetchone()[0]
-        wal = c.execute("SELECT COUNT(*) FROM insider_wallets").fetchone()[0]
-        c.close()
-        assert left == 1 and wal == 0, (left, wal)
-        print("PASS purge membersihkan 10 baris + 1 wallet burn")
-    finally:
-        os.unlink(path)
-        config.DB_PATH = old
-
-
 if __name__ == "__main__":
     test_detector()
     test_record_ignores_burn()
     test_top_filters_legacy_rows()
     test_add_wallet_refuses_burn()
-    test_purge()
     print("\n✅ SEMUA TES GUARD DOMPET LULUS")

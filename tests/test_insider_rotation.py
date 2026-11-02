@@ -111,75 +111,55 @@ def test_record_normalizes_case_and_unknown():
 
 
 # =========================================================
-# 2. Alur _inspect_block → perilaku mode (alert-only vs legacy pipa)
+# 2. process_insider_buy → perilaku mode (alert-only vs legacy pipa)
 # =========================================================
 
-def test_inspect_block_alert_only_no_pipeline():
-    """DEFAULT insider_alert_only=1 → tidak ada listener.process_ca sama sekali."""
+def test_insider_alert_only_no_pipeline():
+    """DEFAULT insider_alert_only=1 → alert dikirim, 0 panggilan listener.process_ca."""
     path, old = _fresh_db()
     try:
         db.init()
         insider = "0x" + "a" * 40
         db.add_insider_wallet(insider, win_count=1)
-        token_out = "0x" + "f" * 40
+        token = "0x" + "f" * 40
 
-        def _eis(tok_in, tok_out):
-            pad = lambda a: a.lower().replace("0x", "").rjust(64, "0")
-            return (tracker.EXACT_INPUT_SINGLE + "0" * 62 + "20"
-                    + pad(tok_in) + pad(tok_out))
-
-        tx = {"from": insider, "to": tracker.SWAP_ROUTER02,
-              "input": bytes.fromhex(_eis(tracker.WETH, token_out)[2:])}
-
-        calls = []
+        calls, sent = [], []
 
         async def fake_listener_process_ca(*a, **kw):
             calls.append((a, kw))
 
-        async def fake_notify(text, **kw):
-            pass
-
-        orig_listener = tracker.listener.process_ca
-        orig_pair = tracker.dx.best_pair
-        orig_notify = tracker._notify_cb
+        orig_l = tracker.listener.process_ca
+        orig_dedup = tracker._dedup_check_send
+        orig_deliver = tracker._deliver_alert
         tracker.listener.process_ca = fake_listener_process_ca
-        tracker.dx.best_pair = lambda ca: {"priceChange": {"m5": 0.5}}
-        tracker._notify_cb = fake_notify
+        tracker._dedup_check_send = lambda *a, **kw: "alert-teks"
+        tracker._deliver_alert = lambda text: sent.append(text)
         try:
-            sent = asyncio.run(tracker._inspect_block(
-                _FakeW3([tx]), 42))
+            asyncio.run(tracker.process_insider_buy(
+                token, insider, pair={"priceChange": {"m5": 0.5}}))
         finally:
-            tracker.listener.process_ca = orig_listener
-            tracker.dx.best_pair = orig_pair
-            tracker._notify_cb = orig_notify
+            tracker.listener.process_ca = orig_l
+            tracker._dedup_check_send = orig_dedup
+            tracker._deliver_alert = orig_deliver
 
-        assert sent == 1, sent          # sinyal terdeteksi
+        assert sent == ["alert-teks"], sent
         assert calls == [], calls       # TAPI tidak masuk pipa listener
-        print("PASS inspect_block alert-only default: 0 panggilan listener.process_ca")
+        print("PASS alert-only default: 1 alert, 0 panggilan listener.process_ca")
     finally:
         os.unlink(path)
         config.DB_PATH = old
 
 
-def test_inspect_block_embeds_insider_addr():
-    """insider_alert_only=0 (perilaku lama): Tx buy insider →
-    process_insider_buy memberi insider_addr=frm ke listener.process_ca."""
+def test_legacy_pipeline_embeds_insider_addr():
+    """insider_alert_only=0 (perilaku lama): CA diteruskan ke
+    listener.process_ca dengan caller_id = alamat insider."""
     path, old = _fresh_db()
     try:
         db.init()
         db.set_("insider_alert_only", "0")   # jalur legacy → pipa
         insider = "0x" + "a" * 40
         db.add_insider_wallet(insider, win_count=1)
-        token_out = "0x" + "f" * 40
-
-        # exactInputSingle calldata sebagai di test_tracker
-        def _eis(tok_in, tok_out):
-            pad = lambda a: a.lower().replace("0x", "").rjust(64, "0")
-            return (tracker.EXACT_INPUT_SINGLE + "0" * 62 + "20"
-                    + pad(tok_in) + pad(tok_out))
-
-        tx = {"from": insider, "to": tracker.SWAP_ROUTER02,
-              "input": bytes.fromhex(_eis(tracker.WETH, token_out)[2:])}
+        token = "0x" + "f" * 40
 
         calls = []
 
@@ -191,27 +171,22 @@ def test_inspect_block_embeds_insider_addr():
                           "allow_buy": allow_buy if allow_buy is not None
                           else kw.get("allow_buy", True)})
 
-        async def fake_notify(text, **kw):
-            pass
-
-        orig_listener = tracker.listener.process_ca
-        orig_pair = tracker.dx.best_pair
-        orig_notify = tracker._notify_cb
+        orig_l = tracker.listener.process_ca
         tracker.listener.process_ca = fake_listener_process_ca
-        tracker.dx.best_pair = lambda ca: {"priceChange": {"m5": 0.5}}
-        tracker._notify_cb = fake_notify
-        try:
-            sent = asyncio.run(tracker._inspect_block(
-                _FakeW3([tx]), 42))
-        finally:
-            tracker.listener.process_ca = orig_listener
-            tracker.dx.best_pair = orig_pair
-            tracker._notify_cb = orig_notify
 
-        assert sent == 1, sent
+        async def _run():
+            await tracker.process_insider_buy(
+                token, insider, pair={"priceChange": {"m5": 0.5}})
+            await asyncio.sleep(0)          # biarkan create_task jalan
+
+        try:
+            asyncio.run(_run())
+        finally:
+            tracker.listener.process_ca = orig_l
+
         assert len(calls) == 1, calls
         call = calls[0]
-        assert call["ca"] == token_out.lower(), call
+        assert call["ca"] == token.lower(), call
         assert call["caller_id"] == insider, call          # alamat insider!
         assert call["caller_name"] == f"INSIDER:{insider[:10]}", call
         assert call["allow_buy"] is True, call
@@ -232,15 +207,6 @@ def test_inspect_block_embeds_insider_addr():
     finally:
         os.unlink(path)
         config.DB_PATH = old
-
-
-class _FakeW3:
-    def __init__(self, txs):
-        self._txs = txs
-        self.eth = self
-
-    def get_block(self, n, full_transactions=True):
-        return {"number": n, "transactions": self._txs}
 
 
 # =========================================================
@@ -349,8 +315,8 @@ if __name__ == "__main__":
     test_record_loss_then_disable()
     test_record_win_resets_loss()
     test_record_normalizes_case_and_unknown()
-    test_inspect_block_alert_only_no_pipeline()
-    test_inspect_block_embeds_insider_addr()
+    test_insider_alert_only_no_pipeline()
+    test_legacy_pipeline_embeds_insider_addr()
     test_prune_stale_insiders()
     test_rotate_recruits_and_reports()
     print("ALL INSIDER ROTATION TESTS PASSED ✅")

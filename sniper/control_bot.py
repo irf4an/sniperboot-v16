@@ -7,7 +7,7 @@ import asyncio
 import re
 import traceback
 from telethon import events, Button, utils
-from . import config, db, engine, agent, clone_guard
+from . import config, db, engine, agent
 
 _pending = {}  # admin_id -> action string ("add_source" | "set:key" | "insaddr")
 _trader = None
@@ -20,11 +20,6 @@ PAGE_SIZE = 10
 ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _rotate_task = None  # Task rotasi background — pengunci anti double-run
 _rotate_summary = None   # dict hasil terakhir (untuk header panel)
-
-
-def _btn_label(btn):
-    """Label tombol — menoleransi stub Button tanpa Telethon (tests)."""
-    return getattr(btn, "text", "") or ""
 
 
 def insider_addr_valid(raw):
@@ -53,26 +48,6 @@ def _insider_labels(addrs):
 def _last_seen_seen(rows):
     vals = [int(r.get("last_seen") or 0) for r in rows]
     return max(vals) if vals else 0
-
-
-def insider_screen_page_text():
-    rows = db.list_insiders()
-    active = [r for r in rows if r["enabled"]]
-    pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
-    lines = [
-        "🕵️ **Insider Wallets**",
-        f"aktif: **{len(active)} / {len(rows)}** wallet",
-    ]
-    last = _last_seen_seen(rows)
-    if last:
-        import time as _t
-        lines.append(f"last_seen terbaru: **{last_ago(last, int(_t.time()))}**")
-    if _rotate_summary:
-        s = _rotate_summary
-        lines.append(f"🔄 rotasi terakhir: +{s.get('added', 0)} / "
-                     f"prune {s.get('disabled', 0)} · "
-                     f"aktif {s.get('total_active', 0)}")
-    return "\n".join(lines), pages
 
 
 def last_ago(ts, now=None):
@@ -591,7 +566,6 @@ def register(bot, trader, user_client=None):
                 for p in db.open_positions()],
             "recent_decisions": db.recent_decisions(8),
             "top_callers": db.top_callers(5),
-            "blacklist": db.list_blacklist(),
             "settings": {k: db.get(k, str) for k in config.SETTING_DEFAULTS},
             "recap_24h": _engine.build_recap(int(_t.time()) - 86400),
         }

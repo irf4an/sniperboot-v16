@@ -6,7 +6,6 @@ import traceback
 from telethon import events, Button
 from . import config, db, safety, agent, dexscreener as dx, pons_radar
 
-CA_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 _trader = None
 _notify = None
@@ -318,32 +317,14 @@ async def _handle(event, src):
             caller_name = getattr(sender, "username", None) or getattr(sender, "first_name", None)
     except Exception:
         pass
-    if db.is_blacklisted(caller_id):
-        if CA_RE.search(event.raw_text or ""):
-            print(f'[blacklist-skip] call dari {caller_name or caller_id} diabaikan (manual blacklist)')
-        return
     text = event.raw_text or ""
     for ca in _extract_ca_strict(text):
         await process_ca(ca, src, caller_id, caller_name)
 
 
-# ---------- PIPA DATA KERAS: teks grup TIDAK diteruskan ke MATA ----------
-# Hanya ALAMAT kontrak valid + metadata numerik yang lewat ke evaluasi.
-# Narasi, promosi, ajakan, atau instruksi bebas dari pesan grup dianggap
-# TEKS TAK-DIPERCAYA dan DIBUANG sebelum sampai ke prompt MATA (anti
-# prompt-injection). Dipisah dari listener agar bisa di-unit-test.
-NUMERIC_META_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
-
-def _trusted_meta_value(v, max_len=200):
-    """Metadata hanya diterima bila numerik murni (angka/percent) ATAU
-    anggota daftar putih operator (nama grup). String bebas lain → None."""
-    if v is None:
-        return None
-    s = str(v).strip()
-    if NUMERIC_META_RE.match(s):
-        return s[:max_len]
-    return None
-
+# ---------- ekstraksi CA dari teks grup ----------
+# Teks bebas dari grup tidak pernah dipakai sebagai instruksi; yang diambil
+# hanya alamat kontrak valid, sisanya dibuang. Dipisah agar bisa di-unit-test.
 def _extract_ca_strict(text) -> list:
     """Ekstrak contract address dengan validasi ketat:
     batas kata di kedua sisi (tidak ikut potongan alamat yang lebih panjang),

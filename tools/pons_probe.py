@@ -1,43 +1,46 @@
 """Probe manual Radar Pons V2 — verifikasi tanpa mengirim Telegram.
 
-Menarik 3000 blok terakhir dari factory Pons V2 ke `pons_queue`, menilai
-kandidat (heuristik + LLM), lalu mencetak alert yang AKAN dikirim. Tidak
-memanggil `notify` dan tidak menyentuh pipa beli.
+Menarik kandidat dari API kurva Pons (`stage=curve&sort=progress`), menyaring
+yang sudah tembus `pons_min_progress`, menilai (heuristik + LLM), lalu
+mencetak alert yang AKAN dikirim. Tidak memanggil `notify` dan tidak
+menyentuh pipa beli.
 
 Pakai:
     PYTHONPATH=. python3 tools/pons_probe.py
-
-Catatan: probe MENGUBAH watermark `pons_last_block` sementara (mundur 3000
-blok) lalu mengembalikannya ke head pada akhir siklus.
 """
 import time
 
 from sniper import db, pons_radar
 
-before_pos = db._conn().execute("SELECT COUNT(*) FROM positions").fetchone()[0]
-before_calls = db._conn().execute("SELECT COUNT(*) FROM calls").fetchone()[0]
 
-w3 = pons_radar._w3()
-head = int(w3.eth.block_number)
-db.set_("pons_last_block", str(head - 3000))
-print(f"HEAD={head} watermark sementara={head - 3000}")
+def main() -> int:
+    before_pos = db._conn().execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+    before_calls = db._conn().execute("SELECT COUNT(*) FROM calls").fetchone()[0]
 
-n = pons_radar.scan_new_launches()
-print(f"event_baru={n}")
-
-pending = db.get_pons_pending(10)
-print(f"antrean={len(pending)}")
-if pending:
     t = time.time()
-    alerts = pons_radar.process_candidates(pending)
-    print(f"proses={round(time.time() - t, 1)}s alert={len(alerts)}")
-    for a in alerts:
-        print("\n" + pons_radar.compose_alert(a))
+    n = pons_radar.scan_curve_progress()
+    print(f"kandidat_diproses={n} ({round(time.time() - t, 1)}s) "
+          f"ambang_progress={db.get('pons_min_progress')}")
 
-after_pos = db._conn().execute("SELECT COUNT(*) FROM positions").fetchone()[0]
-after_calls = db._conn().execute("SELECT COUNT(*) FROM calls").fetchone()[0]
-print(f"\nposisi {before_pos}->{after_pos} · calls {before_calls}->{after_calls}")
-print("stats:", db.pons_stats())
-assert after_pos == before_pos and after_calls == before_calls, \
-    "RADAR MENYENTUH TABEL TRADING — ini bug kritis"
-print("OK: radar tidak menyentuh positions/calls")
+    pending = db.get_pons_pending(10)
+    print(f"antrean={len(pending)}")
+    if pending:
+        t = time.time()
+        alerts = pons_radar.process_candidates(pending)
+        print(f"proses={round(time.time() - t, 1)}s alert={len(alerts)}")
+        for a in alerts:
+            print("\n" + pons_radar.compose_alert(a))
+
+    after_pos = db._conn().execute("SELECT COUNT(*) FROM positions").fetchone()[0]
+    after_calls = db._conn().execute("SELECT COUNT(*) FROM calls").fetchone()[0]
+    print(f"\nposisi {before_pos}->{after_pos} · calls {before_calls}->{after_calls}")
+    print("stats:", db.pons_stats())
+    if after_pos != before_pos or after_calls != before_calls:
+        print("GAGAL: radar menyentuh tabel trading — ini bug kritis")
+        return 1
+    print("OK: radar tidak menyentuh positions/calls")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

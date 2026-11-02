@@ -447,7 +447,6 @@ for k, exp in (("goldilocks_min_age_sec", 10.0),
                ("goldilocks_min_mcap", 5000.0),
                ("goldilocks_max_dev_pct", 0.04),
                ("goldilocks_max_top10_pct", 0.30),
-               ("goldilocks_max_slippage", 0.25),
                ("goldilocks_tp1", 0.35),
                ("goldilocks_tp2", 0.80)):
     check(f"DB {k} = {exp}", abs(db.get(k, float) - exp) < 1e-9,

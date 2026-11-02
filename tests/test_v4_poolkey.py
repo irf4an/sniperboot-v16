@@ -99,15 +99,15 @@ _log_broken["data"] = "0x" + GROK_DATA[:40]  # terpotong jahat
 check("data tidak cukup → None", v4._to_params(_log_broken) is None)
 
 # ============================================================
-# 4. _is_pool_id / is_v4_pair
+# 4. _is_pool_id
 # ============================================================
-print("\n=== 4. is_v4_pair ===")
-check("PoolId 32-byte → True", v4.is_v4_pair(GROK_POOL_ID))
+print("\n=== 4. _is_pool_id ===")
+check("PoolId 32-byte → True", v4._is_pool_id(GROK_POOL_ID))
 check("PoolId tanpa 0x → True",
-      v4.is_v4_pair(GROK_POOL_ID.removeprefix("0x")))
+      v4._is_pool_id(GROK_POOL_ID.removeprefix("0x")))
 check("alamat kontrak 20-byte → False",
-      not v4.is_v4_pair("0x28ad97274f345501e917d49d41c312f78fb9dc07"))
-check("bukan hex → False", not v4.is_v4_pair("0xzz"))
+      not v4._is_pool_id("0x28ad97274f345501e917d49d41c312f78fb9dc07"))
+check("bukan hex → False", not v4._is_pool_id("0xzz"))
 
 # ============================================================
 # 5. PoolKey sendiri (tanpa w3)

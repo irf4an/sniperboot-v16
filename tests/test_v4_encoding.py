@@ -37,6 +37,15 @@ GROK_POOL_ID = "0xb6e68c9c5b48f3c4226037dc67c83e6f5b60897429a7d9c8d3d41a2ea2cb41
 pk = v4.PoolKey(ETH, GROK_CA, 10000, 200,
                 "0x0000000000000000000000000000000000000000")
 
+from eth_abi import decode as abi_decode
+
+
+def _decode_input(raw):
+    """Decode inputs[0] UniversalRouter.execute → (actions bytes, params list)."""
+    acts, params = abi_decode(["bytes", "bytes[]"], raw)
+    return acts, list(params)
+
+
 # ============================================================
 # 1. encode_buy — format VERIFIED on-chain
 # ============================================================
@@ -49,17 +58,15 @@ check(f"value == {5 * 10**17} wei (msg.value)",
       value == 5 * 10**17, str(value))
 
 # inputs[0] HARUS bisa didecode balik dgn ("bytes","bytes[]")
-from eth_abi import decode as abi_decode
-acts, params = v4.decode_v4_input(inputs[0])
+acts, params = _decode_input(inputs[0])
 check("decode balik inputs[0] dgn ['bytes','bytes[]'] → 2 elem",
       len(params) == 3, str(params))
 check("actions == b'\\x06\\x0c\\x0f' (3 byte opcode MURNI)",
       acts == b"\x06\x0c\x0f", acts.hex())
-check("decode_actions → 3 opcode", len(v4.decode_actions(acts)) == 3,
-      str(len(v4.decode_actions(acts))))
-check("decode_actions[0]==b'\\x06'", v4.decode_actions(acts)[0] == b"\x06")
-check("decode_actions[1]==b'\\x0c'", v4.decode_actions(acts)[1] == b"\x0c")
-check("decode_actions[2]==b'\\x0f'", v4.decode_actions(acts)[2] == b"\x0f")
+check("aksi berisi 3 opcode", len(acts) == 3, str(len(acts)))
+check("opcode[0]==b'\\x06'", acts[0:1] == b"\x06")
+check("opcode[1]==b'\\x0c'", acts[1:2] == b"\x0c")
+check("opcode[2]==b'\\x0f'", acts[2:3] == b"\x0f")
 
 # ============================================================
 # 2. decode balik params
@@ -95,7 +102,7 @@ print("\n=== 3. encode_sell ===")
 c2, i2, v2 = v4.encode_sell(pk, 10**18, 10**16)
 check("commands byte pertama=0x10 juga", c2[0] == 0x10)
 check("value=0 (tidak kirim ETH)", v2 == 0, str(v2))
-acts2, params2 = v4.decode_v4_input(i2[0])
+acts2, params2 = _decode_input(i2[0])
 check("actions sell = 0x060c0f", acts2 == b"\x06\x0c\x0f", acts2.hex())
 check("3 params (sell pun)", len(params2) == 3, str(len(params2)))
 
@@ -145,17 +152,17 @@ except ValueError as e:
           "unsupported_native_side" in str(e), str(e))
 
 # ============================================================
-# 5. is_v4_pair + Permit2 helper (D3/D4)
+# 5. _is_pool_id + Permit2 helper (D3/D4)
 # ============================================================
-print("\n=== 5. is_v4_pair & permit2 helper ===")
-check("PoolId 32-byte → True", v4.is_v4_pair(GROK_POOL_ID))
-check("alamat ERC20 20-byte → False", not v4.is_v4_pair(GROK_CA))
+print("\n=== 5. _is_pool_id & permit2 helper ===")
+check("PoolId 32-byte → True", v4._is_pool_id(GROK_POOL_ID))
+check("alamat ERC20 20-byte → False", not v4._is_pool_id(GROK_CA))
 
 # selector Permit2.approve = 0x87517c45 (D3)
 from eth_utils import keccak
 sel = keccak(text="approve(address,address,uint160,uint48)")[:4].hex()
 check("selector Permit2.approve == 0x87517c45",
-      sel == v4.SEL_PERMIT2_APPROVE[2:], sel)
+      sel == "87517c45", sel)
 check("PERMIT2_ABI fungsi approve (bukan allowOwner)",
       any(f.get("name") == "approve" for f in v4.PERMIT2_ABI)
       and not any(f.get("name") == "allowOwner" for f in v4.PERMIT2_ABI))
@@ -193,7 +200,7 @@ try:
     check("command fn = execute", "execute" in str(getattr(fn, "fn_name", "")))
     check("commands == 0x10", bytes(c) == b"\x10", bytes(c).hex())
     check("1 input", len(inp) == 1, str(len(inp)))
-    gacts, gparams = v4.decode_v4_input(inp[0])
+    gacts, gparams = _decode_input(inp[0])
     check("golden actions == 0x060c0f", gacts == b"\x06\x0c\x0f", gacts.hex())
     check("golden len(params) == 3", len(gparams) == 3, str(len(gparams)))
     sp_g = abi_decode(["((address,address,uint24,int24,address),bool,"
@@ -212,7 +219,7 @@ try:
     # kompatibilitas: encode_kita(dari golden poolkey) == golden input?
     gpk = v4.PoolKey(ETH, gp2[0], sp_g[0][2], sp_g[0][3], sp_g[0][4])
     _cmds, _inp, _val = v4.encode_buy(gpk, sp_g[2], gp2[1])
-    _ga, _gp = v4.decode_v4_input(_inp[0])
+    _ga, _gp = _decode_input(_inp[0])
     check("RE-ENCODE == golden round-trip (aksi & params identik)",
           _ga == gacts and len(_gp) == 3
           and abi_decode(["address", "uint256"], _gp[1]) == gp1

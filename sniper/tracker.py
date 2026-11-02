@@ -3,7 +3,7 @@
 Sumber sinyal KETIGA HoodSniper: memantau transaksi blok baru di Robinhood
 Chain (chainId 4663), mengecek apakah pengirimnya wallet insider (hasil
 screening tools/screen_insiders.py, tersimpan di tabel insider_wallets),
-lalu kalau insider itu memanggil SwapRouter02 untuk BUY token →
+lalu kalau insider itu menerima token hasil BUY (event ERC20 Transfer) →
 Kirim NOTIF TELEGRAM RINGKAS (wallet, simbol+CA, mcap/liq, chart) seperti
 intel pasar — TANPA masuk pipa listener.
 
@@ -15,25 +15,15 @@ Mode setting `insider_alert_only`:
 
 Desain:
 - Async loop INDEPENDEN (task background bot.py), on/off via setting tracker_on.
-- Fingerprint calldata Uniswap: selector 4 byte pertama.
-    exactInputSingle = 0x414bf389  (input pertama = chunk abi-encoded
-      tokenIn(32) | tokenOut(32) | fee(32) | recipient(32) | ...)
-    exactInput       = 0xc04b8d59  (path bytes multicall — diekstrak regex)
-    multicall(bytes[]) = 0xac9650d8 — byte-data tiap sub-call dianalisis rekursif
-- ROUTE_SELECTOR fallback: kalau `to` adalah router tapi selector tak dikenali,
-  tokenOut dicari dari alamat yang bukan WETH/USDG sentinel di raw data.
-- Anti-melewatkan blok: packet per geth 'newHeads' ~2 dtk → probe kumpulan blok
-  dari latest-1 (fingerprint finger_blok terakhir) sampai beberapa dtk penuh
-  (BLOCK_GRACE). Finger bertahan lintas restart agar blok tidak dipindai ulang.
+- Deteksi: eth_getLogs batch event ERC20 Transfer ke wallet insider
+  (TRANSFER_TOPIC), bukan lagi scan per-blok router selector.
+- Anti-lag: satu call getLogs menyapu BATCH_MAX_BLOCKS blok; kalau
+  tertinggal > CATCHUP_LIMIT blok → fast-forward.
 - Aman diganggu RPC gagal: try/except + sleep; loop tidak mati.
-- Deadlock-free: Router py 直 punya executor sendiri, AMBIL KONTRAK SEKALI
-  SAAT SETUP (di-clone per-loop agar pytest bisa patch config.RPC_URL).
 """
 from __future__ import annotations
 
 import asyncio
-import json
-import re
 import time
 
 import threading
@@ -43,12 +33,6 @@ from . import dexscreener as dx
 
 # ============================ KONSTANTA ============================
 
-SWAP_ROUTER02 = "0xCaf681a66D020601342297493863E78C959E5cb2".lower()
-
-# Selector 4-byte pertama dari calldata (fungsi Uniswap SwapRouter02)
-EXACT_INPUT_SINGLE = "0x414bf389"   # exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))
-EXACT_INPUT        = "0xc04b8d59"   # exactInput(bytes) — path ter-encode
-MULTICALL          = "0xac9650d8"   # multicall(bytes[])
 
 # Quote assets Robinhood Chain — dipakai buat membedakan tokenIn vs tokenOut
 WETH  = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73".lower()
@@ -64,7 +48,6 @@ MAX_SLIP_PCT = 5.0
 # Kalau insider membeli lalu harga langsung anjlok, jangan kejar.
 # (sudah tertangani listener.process_ca staleness gate + safety filter)
 
-BLOCK_GRACE = 6.0   # dtk kedaluwarsa menanti blok "hampir" terlewat
 POLL_IDLE = 0.5     # dtk kalau tidak ada blok baru (Robinhood Chain ~10 blok/dtk)
 
 # ============ BATCH LOG SCAN (anti-lag) ============
@@ -88,100 +71,6 @@ POLL_INTERVAL = 2.5      # 2.5s ≈ ~25 blok baru di Robinhood Chain
 # Dexscreener / Blockscout base URLs (dipakai tersier di screen_insiders, di sini
 # hanya untuk _price_grace pasca-arah track agar tidak double-fetch)
 
-
-# ============================ UTIL ============================
-
-def _token_out_from_exact_input_single(data_hex: str):
-    """Layout calldata (hex chars):
-       [0:8]  selector
-       [8:72] offset params (= 0x20)
-       [72:136] tokenIn  (alamat = 40 hex terakhir dari word)
-       [136:200] tokenOut
-    """
-    data = data_hex.lower().replace("0x", "")
-    if len(data) < 200:
-        return None
-    tok_in = data[96:136]     # 40 hex terakhir word-1
-    tok_out = data[160:200]   # alamat dari word-2
-    if len(tok_out) != 40 or int(data[8:72] or "0", 16) != 0x20:
-        # offset bukan 0x20 (layout aneh) → fallback regex universal
-        return None
-    if tok_out in {"0" * 40} or ("0x" + tok_out) in QUOTE_ASSETS:
-        # JUAL: tokenOut = quote → token sebenarnya adalah tokenIn
-        return ("0x" + tok_in) if tok_in not in {"0" * 40} else None
-    return "0x" + tok_out
-
-
-def _words(data_hex: str):
-    """Pecah calldata jadi ABI words 64-hex. Layout: [0:8] selector,
-    lalu tiap word-ke-i = data[8 + i*64 : 8 + (i+1)*64]."""
-    data = data_hex.lower().replace("0x", "")
-    out = [data[:8]]     # word-0 = selector 4-byte
-    i = 8
-    while i + 64 <= len(data):
-        out.append(data[i:i + 64])
-        i += 64
-    return out
-
-
-def _tokens_from_path(data_hex: str) -> list:
-    """Tarik SEMUA kandidat alamat EVM dari calldata ABI-encoded.
-
-    Alamat 20B dalam ABI selalu tampak sebagai 40-hex di sisi KANAN
-    sebuah word 64-hex dengan 24-hex nol di kiri (left-pad 12 byte).
-    Word yang tidak memenuhi pola ini (fee, amount, offset) REJECT.
-    """
-    out, seen = [], set()
-    for word in _words(data_hex):
-        if len(word) != 64:
-            continue
-        head, tail = word[:24], word[24:]
-        if head != "0" * 24 or tail == "0" * 40 or int(tail, 16) <= 0xffff:
-            continue
-        if not all(c in "0123456789abcdef" for c in tail):
-            continue
-        cand = "0x" + tail
-        if cand not in seen:
-            seen.add(cand)
-            out.append(cand)
-    return out
-
-
-def extract_token_out(data_hex: str):
-    """Ekstrak address token TARGET (tokenOut) dari calldata router.
-       Return: alamat 20B 0x-hex huruf kecil, atau None kalau gagal.
-
-       Mendukung:
-         - exactInputSingle: tokenOut langsung dari word kedua params
-         - exactInput / multicall: semua alamat di path dicicipi, dipilih
-           satu yang BUKAN quote asset (WETH/USDG/sentinel).
-    """
-    if not data_hex or len(data_hex) < 74:
-        return None
-    d = data_hex.lower()
-    sel = d[:10]
-    if sel == EXACT_INPUT_SINGLE:
-        tok = _token_out_from_exact_input_single(d)
-        if tok and tok not in QUOTE_ASSETS:
-            return tok
-        # kalau tok None/quote → jatuh ke fallback universal di bawah
-    if sel not in (EXACT_INPUT_SINGLE, EXACT_INPUT, MULTICALL):
-        return None   # selector tidak dikenal → jangan menebak-nebak
-    # fallback universal: semua alamat 20B di data, kecualikan quote
-    cands = [t for t in _tokens_from_path(d)
-             if t.lower() not in QUOTE_ASSETS]
-    return cands[-1].lower() if cands else None
-
-
-def is_buy_call(data_hex: str, from_token=None) -> bool:
-    """Deteksi apakah transaksi router ini mengarah ke BUY token
-       (bukan SELL). Simpel: tokenIn harus quote asset (WETH/USDG).
-       Heuristik 'semua alamat di data: tokenIn = alamat PERTAMA'. """
-    toks = [t.lower() for t in _tokens_from_path(data_hex)]
-    if not toks:
-        return False
-    tok_in = toks[0]
-    return tok_in in QUOTE_ASSETS
 
 
 # ============================ PIPA ============================
@@ -389,12 +278,12 @@ async def _alert_after_retry(token_ca: str, insider_addr: str,
 
 async def process_insider_buy(token_ca: str, insider_addr: str = "",
                               notify=None, pair=None):
-    """Insider membeli token (deteksi _inspect_block/_inspect_logs).
+    """Insider membeli token (dideteksi _inspect_logs).
 
     Mode insider_alert_only=1 (DEFAULT): kirim notif Telegram RINGKAS
     (wallet, simbol+CA, mcap/liq, chart) — TANPA masuk pipa listener
-    (0 evaluasi buy, 0 posisi baru, 0 RPC tambahan: pair berasal dari
-    respons Dexscreener _inspect_block yang sudah ada).
+    (0 evaluasi buy, 0 posisi baru, 0 RPC tambahan: `pair` dioper dari
+    pemanggil yang sudah mengambilnya).
 
     Mode insider_alert_only=0: perilaku LAMA — CA diteruskan ke
     listener.process_ca (allow_buy=True, siklus penuh sinyal scanner).
@@ -450,103 +339,6 @@ async def process_insider_buy(token_ca: str, insider_addr: str = "",
     _deliver_alert(text)
 
 
-# ============================ SCAN BLOK ============================
-
-def pool_too_old(pair, max_age_sec, now_ms=None):
-    """(too_old, age_sec) dari respons Dexscreener.
-
-    Fail-OPEN: pair/created tidak ada / tidak bisa diparse → (False, None)
-    (jangan memblokir sinyal karena data tak tersedia). `pairCreatedAt`
-    Dexscreener dalam MILIDETIK.
-    """
-    try:
-        if not pair or not isinstance(pair, dict):
-            return False, None
-        created = pair.get("pairCreatedAt")
-        if created is None or created == "":
-            return False, None
-        created_ms = float(created)
-        now_val = now_ms if now_ms is not None else time.time() * 1000
-        age_sec = (float(now_val) - created_ms) / 1000.0
-        if age_sec != age_sec:  # NaN guard
-            return False, None
-        return age_sec > float(max_age_sec), age_sec
-    except (TypeError, ValueError):
-        return False, None
-
-
-async def _inspect_block(w3, block_number: int):
-    """Periksa satu blok: cari tx dari wallet insider ke router swap → pipa.
-
-    Return jumlah sinyal yang dikirim (untuk stats/mode dry-run).
-    """
-    insiders = set(db.get_active_insiders())
-    if not insiders:
-        return 0
-    try:
-        block = await asyncio.to_thread(
-            w3.eth.get_block, block_number, full_transactions=True)
-    except Exception as e:
-        print(f"[tracker] get_block({block_number}) fail: {e}")
-        return 0
-    sent = 0
-    for tx in (block.get("transactions") or []):
-        frm = (tx.get("from") or "").lower()
-        if frm not in insiders:
-            continue
-        to = (tx.get("to") or "").lower()
-        if to != SWAP_ROUTER02:
-            continue
-        data = (tx.get("input") or b"")
-        if hasattr(data, "hex"):
-            data_hex = "0x" + data.hex()
-        else:
-            data_hex = str(data)
-        if len(data_hex) < 12:  # naked transfer / no sel
-            continue
-        sel = data_hex[:10]
-        if sel not in (EXACT_INPUT_SINGLE, EXACT_INPUT, MULTICALL):
-            print(f"[tracker] insider {frm[:12]}… ke router, selector tak dikenal: {sel}")
-            continue
-        if not is_buy_call(data_hex):
-            print(f"[tracker] insider {frm[:12]}… SELL (tokenIn bukan quote) — skip")
-            continue
-        token_out = extract_token_out(data_hex)
-        if not token_out or token_out in QUOTE_ASSETS:
-            print(f"[tracker] insider {frm[:12]}… tokenOut tak terdeteksi — skip")
-            continue
-        # 🔒 Proteksi slippage: bandingkan harga DEX sekarang vs N detik lalu.
-        # Karena tracker REAKTIF (tanpa cache harga), cukup cek priceChange m5
-        # Dexscreener — kalau harga sudah lari tajam, lewati (insider buy di
-        # awal; kita ikut di harga biasanya sudah naik).
-        pair = None
-        try:
-            pair = await asyncio.to_thread(dx.best_pair, token_out)
-            # 🔒 Gate UMUR POOL — HANYA jalur legacy (insider_alert_only=0,
-            # sniper butuh launch baru). Jalur alert-only TIDAK membuang
-            # token berumur: paus beli koin lama = intel tetap dikirim.
-            if (db.get("insider_alert_only", str) or "1") != "1":
-                max_age = float(db.get("goldilocks_max_age_sec", float) or 300)
-                too_old, age = pool_too_old(pair, max_age)
-                if too_old:
-                    print(f"[tracker] skip {token_out[:10]}… umur {age:.0f}s > "
-                          f"{max_age:.0f}s (legacy: bukan launch baru)")
-                    continue
-            pc = (((pair or {}).get("priceChange") or {}).get("m5")) or 0.0
-            if float(pc) > MAX_SLIP_PCT:
-                print(f"[tracker] beta pusing: 'insider buy {token_out[:10]}… "
-                      f"skip — harga sudah +{pc:.1f}% dalam 5m (slippage guard)")
-                continue
-        except Exception:
-            pass  # tebusan data harga gagal → jangan block-trade
-        try:
-            await process_insider_buy(token_out, insider_addr=frm,
-                                      pair=pair)
-            sent += 1
-        except Exception as e:
-            print(f"[tracker] process_insider_buy fail: {e}")
-    return sent
-
 
 # ============================ BATCH LOG SCAN ============================
 
@@ -555,11 +347,6 @@ def _insider_to_topic2(insiders: set) -> list:
     return ["0x000000000000000000000000" + a.lower().replace("0x", "")
             for a in insiders]
 
-
-def _topic_addr(topic) -> str:
-    """Ekstrak alamat 20B dari sebuah log topic (HexBytes/HexStr/str)."""
-    s = topic.hex() if hasattr(topic, "hex") else str(topic)
-    return "0x" + s[-40:].lower()
 
 
 async def _inspect_logs(w3, from_block: int, to_block: int) -> int:
