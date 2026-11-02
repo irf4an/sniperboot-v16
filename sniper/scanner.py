@@ -23,16 +23,9 @@ import asyncio
 import math
 import time
 
-import requests
-
 from . import config, db, listener
 from . import dexscreener as dx
-
-PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
-BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
-
-_S = requests.Session()
-_S.headers.update({"User-Agent": "hoodsniper/1.0"})
+from .hexutil import topic_addr
 
 # --- Robinhood Chain mainnet (chainId 4663) ---
 # Alamat kontrak sumber event & quote asset utama di chain ini.
@@ -61,50 +54,7 @@ _RETRY_THROTTLE_SEC = 20.0
 _decision_ts = []
 
 
-# ==================== SUMBER KANDIDAT ====================
-def fetch_profile_candidates() -> list:
-    """CA token Robinhood Chain dari profil & boost terbaru Dexscreener.
-
-    Ini SAMPEL pasar (token yang baru update profil / lagi di-boost), bukan
-    firehose semua coin — lihat batasan di SCANNER_PROTOTYPE.md.
-    Error jaringan apa pun → kembalikan yang sempat terkumpul, tidak raise.
-    """
-    chain = (config.DEX_CHAIN_MATCH or "robinhood").lower()
-    out = []
-    for url in (PROFILES_URL, BOOSTS_URL):
-        try:
-            r = _S.get(url, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            print(f"[scanner] gagal ambil {url.split('/')[3]}: {e}")
-            continue
-        rows = data if isinstance(data, list) else []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            if (row.get("chainId") or "").lower() != chain:
-                continue
-            ca = (row.get("tokenAddress") or "").lower()
-            if ca and ca not in out:
-                out.append(ca)
-    return out
-
-
-def _topic_addr(topic) -> str:
-    """Ambil alamat (20 byte terakhir) dari sebuah topic log."""
-    if hasattr(topic, "hex"):
-        h = topic.hex()
-    elif isinstance(topic, (bytes, bytearray)):
-        h = topic.hex()
-    else:
-        h = str(topic)
-    h = h.lower()
-    if not h.startswith("0x"):
-        h = "0x" + h
-    return "0x" + h[-40:]
-
-
+# ==================== parser event (fungsi murni) ====================
 def parse_v4_initialize_log(log):
     """Dari log Initialize PoolManager Uniswap v4 → CA token non-quote.
 
@@ -119,8 +69,8 @@ def parse_v4_initialize_log(log):
         topics = log.get("topics") if isinstance(log, dict) else getattr(log, "topics", None)
         if not topics or len(topics) < 4:
             return None
-        c0 = _topic_addr(topics[2])
-        c1 = _topic_addr(topics[3])
+        c0 = topic_addr(topics[2])
+        c1 = topic_addr(topics[3])
     except Exception:
         return None
     non_quote = [t for t in (c0, c1) if t not in QUOTE_ASSETS_V4]
@@ -334,7 +284,7 @@ def collect_and_rank() -> list:
     Return list of {"ca", "pair", "score"}. Statistik ringkas siklus disimpan
     di _last_stats. Fungsi sinkron (requests) — panggil via asyncio.to_thread.
     """
-    cands_profiles = fetch_profile_candidates()
+    cands_profiles = dx.profile_candidates()
     # antrean pending: CA yang terdeteksi on-chain tapi Dexscreener belum
     # selesai mengindeks pair-nya (indeks bisa molor 1-3 menit). Tanpa
     # antrean ini CA langsung dibuang saat best_pair -> None dan hilang

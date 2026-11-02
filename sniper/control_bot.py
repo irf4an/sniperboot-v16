@@ -7,7 +7,7 @@ import asyncio
 import re
 import traceback
 from telethon import events, Button, utils
-from . import config, db, engine, agent
+from . import config, db, engine, agent, fmt
 
 _pending = {}  # admin_id -> action string ("add_source" | "set:key" | "insaddr")
 _trader = None
@@ -26,23 +26,6 @@ def insider_addr_valid(raw):
     """0x + 40 hex, regex ketat. Return address lower() atau None."""
     m = ADDR_RE.match((raw or "").strip())
     return m.group(0).lower() if m else None
-
-
-def _short_addr(addr, label=""):
-    a = (addr or "").lower()
-    if label and label.strip():
-        return label.strip()
-    return f"{a[:6]}…{a[-4:]}"
-
-
-def _insider_labels(addrs):
-    labels = {}
-    for row in db.list_insiders():
-        addr = (row.get("address") or "").lower()
-        label = (row.get("label") or "").strip()
-        if addr and label and addr in addrs:
-            labels[addr] = label
-    return labels
 
 
 def _last_seen_seen(rows):
@@ -68,7 +51,7 @@ def insider_rows_text(rows):
     now = int(__import__("time").time())
     lines = []
     for r in rows:
-        label = _short_addr(r["address"], r.get("label"))
+        label = fmt.short_addr(r["address"], r.get("label"))
         seen = int(r.get("last_seen") or 0)
         seen_txt = last_ago(seen, now) if seen else "—"
         lines.append(f"• {label} · "

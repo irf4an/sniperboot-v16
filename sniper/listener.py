@@ -4,7 +4,7 @@ import re
 import time
 import traceback
 from telethon import events, Button
-from . import config, db, safety, agent, dexscreener as dx, pons_radar
+from . import config, db, safety, agent, fmt, dexscreener as dx, pons_radar
 
 
 _trader = None
@@ -100,7 +100,7 @@ def bind_public_notify(fn):
     _public_notify = fn
 
 
-# ---------- format kartu keputusan Mata (rapi & konsisten) ----------
+# ---------- format angka notifikasi ----------
 def _fmt_usd(v) -> str:
     """$48.200 — pemisah ribuan gaya Indonesia, tanpa desimal."""
     try:
@@ -108,11 +108,6 @@ def _fmt_usd(v) -> str:
     except (TypeError, ValueError):
         return "$?"
     return "$" + f"{v:,.0f}".replace(",", ".")
-
-
-def _fmt_liq(v) -> str:
-    """Tampilkan likuiditas; pool v4 tanpa data Dexscreener → 'n/a'."""
-    return "liq n/a (v4 on-chain)" if v is None else f"liq ${v:,.0f}"
 
 
 def _fmt_pct(v) -> str:
@@ -139,20 +134,6 @@ def _fmt_age(pair) -> str:
     if m < 1440:
         return f"{m / 60:.1f} jam".replace(".", ",")
     return f"{m / 1440:.1f} hari".replace(".", ",")
-
-
-def _fmt_money_compact(v) -> str:
-    """$812 / $3.1k / $52k (tanpa .0) / $1.2M — '—' bila tak tersedia."""
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return "—"
-    if v >= 1_000_000:
-        return f"${v / 1_000_000:.1f}M"
-    if v >= 1000:
-        s = f"${v / 1000:.1f}k"
-        return s.replace(".0k", "k")
-    return f"${v:.0f}"
 
 
 def _fmt_gate_metrics(m) -> str:
@@ -196,8 +177,8 @@ def _fmt_gate_metrics(m) -> str:
         umur = f"{age_raw:.0f}s" if age_raw < 120 else f"{age_raw / 60:.0f}m"
     else:
         umur = "—"
-    liq = _fmt_money_compact(m.get("liq"))
-    mcap = _fmt_money_compact(m.get("mcap"))
+    liq = fmt.usd_compact(m.get("liq"))
+    mcap = fmt.usd_compact(m.get("mcap"))
     ratio_raw = _num(m.get("ratio"))
     rasio = f"{ratio_raw * 100:.0f}%" if ratio_raw is not None else "—"
     dev_raw = _num(m.get("dev_pct"))
@@ -225,11 +206,8 @@ def _agent_card(pair, ca, src_name, decision) -> str:
     mcap = float(mcap_oc) if mcap_oc else mcap_screen
     sym = pair.get("baseToken", {}).get("symbol", "?")
 
-    def _fmt_liq(v):
-        return "liq n/a (v4 on-chain)" if v is None else f"liq ${v:,.0f}"
-
     liq = dx.liq_usd_or_none(pair)
-    liq_line = _fmt_liq(liq)
+    liq_line = fmt.liq(liq)
     liq_pct = (liq / mcap * 100) if (liq is not None and mcap > 0) else 0.0
     chg = pair.get("priceChange") or {}
     txns = pair.get("txns") or {}
@@ -241,7 +219,7 @@ def _agent_card(pair, ca, src_name, decision) -> str:
 
     lines = [head, f"`{ca}`"]
     lines.append(
-        f"📊 Mcap {_fmt_usd(mcap)} · {_fmt_liq(liq)}"
+        f"📊 Mcap {_fmt_usd(mcap)} · {fmt.liq(liq)}"
         + (f" ({liq_pct:.0f}% mcap)" if liq is not None and mcap > 0 else "")
         + f" · Umur {_fmt_age(pair)}")
     lines.append(
@@ -929,7 +907,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         await _notify_log(
             f"🧪 **[SIMULASI] BUY {sym}**  _via {src['name']}_\n"
             f"`{pos['ca']}`\n"
-            f"💰 mcap ${mcap_onchain:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
+            f"💰 mcap ${mcap_onchain:,.0f} | {fmt.liq(liq)} | {pos['pool_type']}\n"
             f"paper masuk **${pos['usd_spent']:.2f}** ({pos['eth_spent']:.6f} ETH) → "
             f"{pos['tokens_total']:,.0f} {sym}\n"
             f"entry ${pos['entry_price_usd']:.10f} (on-chain quote){sell_line}"
@@ -957,7 +935,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         if _notify or _public_notify:
             await _notify_log(
                 f"🔭 **SCANNER (dry): {sym}** lolos semua filter{ai_line}\n"
-                f"`{ca}`\n💰 mcap ${mcap:,.0f} | {_fmt_liq(liq)}\n"
+                f"`{ca}`\n💰 mcap ${mcap:,.0f} | {fmt.liq(liq)}\n"
                 f"— buy TIDAK dieksekusi (allow_buy=False)")
         return "no_buy_scanner"
 
@@ -1036,7 +1014,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
     await _notify_log(
         f"🟢 **BUY {pos['symbol']}**  _via {src['name']}_\n"
         f"`{pos['ca']}`{gate_lines}\n"
-        f"💰 mcap ${_mcap_live:,.0f} | {_fmt_liq(liq)} | {pos['pool_type']}\n"
+        f"💰 mcap ${_mcap_live:,.0f} | {fmt.liq(liq)} | {pos['pool_type']}\n"
         f"🌐 sosmed: {soc_line}\n"
         f"masuk **${pos['usd_spent']:.2f}** ({pos['eth_spent']:.6f} ETH) → {pos['tokens_total']:,.0f} {pos['symbol']}\n"
         f"entry ${pos['entry_price_usd']:.10f}{caller_line}{hp}{agent_line}",

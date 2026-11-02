@@ -52,7 +52,7 @@ check("add_pending_pool: idempotent (INSERT OR IGNORE)",
 print("\n=== 2. cycle 1: best_pair None → tetap di antrean ===")
 
 _orig_best_pair = scanner.dx.best_pair
-_orig_fetch_profiles = scanner.fetch_profile_candidates
+_orig_fetch_profiles = scanner.dx.profile_candidates
 _orig_fetch_multipool = scanner.fetch_multipool_candidates
 _orig_make_w3 = scanner._make_w3
 _orig_market_ok = scanner.market_ok
@@ -79,7 +79,7 @@ def _fake_make_w3():
 
 
 scanner.dx.best_pair = _fake_best_pair_none
-scanner.fetch_profile_candidates = _fake_profiles
+scanner.dx.profile_candidates = _fake_profiles
 scanner.fetch_multipool_candidates = _fake_multipool
 scanner._make_w3 = _fake_make_w3
 
@@ -198,7 +198,7 @@ check("_retryable_status: bought → False",
 # 6) Restore mock & DB — jebakan lain tidak dikotamin
 # ======================================================================
 scanner.dx.best_pair = _orig_best_pair
-scanner.fetch_profile_candidates = _orig_fetch_profiles
+scanner.dx.profile_candidates = _orig_fetch_profiles
 scanner.fetch_multipool_candidates = _orig_fetch_multipool
 scanner._make_w3 = _orig_make_w3
 scanner.market_ok = _orig_market_ok

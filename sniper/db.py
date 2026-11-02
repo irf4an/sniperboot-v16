@@ -763,6 +763,24 @@ def list_insiders(only_enabled=False):
         return [dict(r) for r in c.execute(q)]
 
 
+def insider_labels(addrs) -> dict:
+    """Map address (huruf kecil) → label operator, hanya untuk `addrs`.
+
+    Dipakai notifikasi tracker & panel control_bot supaya keduanya
+    menampilkan nama wallet yang sama. Gagal DB tidak boleh memutus alert.
+    """
+    labels = {}
+    try:
+        for row in list_insiders():
+            addr = (row.get("address") or "").lower()
+            label = (row.get("label") or "").strip()
+            if addr and label and addr in addrs:
+                labels[addr] = label
+    except Exception:
+        pass
+    return labels
+
+
 def _init_insider_buys(c):
     c.execute("""CREATE TABLE IF NOT EXISTS insider_buys(
         id INTEGER PRIMARY KEY AUTOINCREMENT,

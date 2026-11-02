@@ -3,8 +3,39 @@ import requests
 from . import config
 
 BASE = "https://api.dexscreener.com/latest/dex"
+PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
+BOOSTS_URL = "https://api.dexscreener.com/token-boosts/latest/v1"
 _S = requests.Session()
 _S.headers.update({"User-Agent": "hoodsniper/1.0"})
+
+
+def profile_candidates() -> list:
+    """CA token Robinhood Chain dari profil & boost terbaru Dexscreener.
+
+    Ini SAMPEL pasar (token yang baru update profil / lagi di-boost), bukan
+    firehose semua coin. Error jaringan apa pun → kembalikan yang sempat
+    terkumpul, tidak raise.
+    """
+    chain = (config.DEX_CHAIN_MATCH or "robinhood").lower()
+    out = []
+    for url in (PROFILES_URL, BOOSTS_URL):
+        try:
+            r = _S.get(url, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"[dexscreener] gagal ambil {url.split('/')[3]}: {e}")
+            continue
+        for row in (data if isinstance(data, list) else []):
+            if not isinstance(row, dict):
+                continue
+            if (row.get("chainId") or "").lower() != chain:
+                continue
+            ca = (row.get("tokenAddress") or "").lower()
+            if ca and ca not in out:
+                out.append(ca)
+    return out
+
 
 
 def token_pairs(ca: str):

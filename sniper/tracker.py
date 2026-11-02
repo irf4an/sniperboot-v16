@@ -25,10 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-
 import threading
 
-from . import config, db, listener
+from . import config, db, listener, fmt
 from . import dexscreener as dx
 
 # ============================ KONSTANTA ============================
@@ -63,16 +62,6 @@ CATCHUP_LIMIT = 500      # kalau tertinggal > 500 blok → fast-forward
 CATCHUP_KEEP = 50        # ...tapi tetap pindai 50 blok terakhir
 POLL_INTERVAL = 2.5      # 2.5s ≈ ~25 blok baru di Robinhood Chain
 
-# Pola deteksi token dalam path bytes (exactInput/multicall path):
-# data dexscreener adalah HEX TELANJANG (tanpa "0x"), jadi regex cari
-# run hex ≥40 karakter lalu ambil 40 karakter pertama dari tiap run
-# (alamat EVM 20B selalu muncul sebagai 40 hex di kolom kiri word).
-
-# Dexscreener / Blockscout base URLs (dipakai tersier di screen_insiders, di sini
-# hanya untuk _price_grace pasca-arah track agar tidak double-fetch)
-
-
-
 # ============================ PIPA ============================
 
 def _src() -> dict:
@@ -83,42 +72,6 @@ def _src() -> dict:
             return s
     return {"id": None, "chat_id": 0, "topic_id": 0,
             "name": "INSIDER_TRACKER", "mcap_max": 50000}
-
-
-def _short_wallet(addr: str, labels: dict = None) -> str:
-    """Label singkat wallet: label DB bila ada, kalau tidak 0xabc…def."""
-    a = (addr or "").lower()
-    if labels and a in labels:
-        return labels[a]
-    return f"{a[:6]}…{a[-4:]}" if len(a) >= 10 else (a or "?")
-
-
-def _insider_labels(addrs) -> dict:
-    """Map address → label DB (insider_wallets), untuk notif alert."""
-    labels = {}
-    try:
-        for row in db.list_insiders():
-            addr = (row.get("address") or "").lower()
-            label = (row.get("label") or "").strip()
-            if addr and label and addr in addrs:
-                labels[addr] = label
-    except Exception:
-        pass
-    return labels
-
-
-def _fmt_usd_compact(v) -> str:
-    """$812 / $3.1k / $1.2M — '?' bila tak tersedia."""
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return "?"
-    if v >= 1_000_000:
-        return f"${v / 1_000_000:.1f}M"
-    if v >= 1000:
-        s = f"${v / 1000:.1f}k"
-        return s.replace(".0k", "k")
-    return f"${v:,.0f}"
 
 
 def _insider_alert_text(pair, ca, wallet_label: str,
@@ -149,7 +102,7 @@ def _insider_alert_text(pair, ca, wallet_label: str,
         "🕵️ **INSIDER BUY — {}**".format(sym),
         wallet_line,
         f"`{ca}`",
-        f"📊 mcap {_fmt_usd_compact(mcap)} · liq {_fmt_usd_compact(liq) if liq is not None else 'n/a'}",
+        f"📊 mcap {fmt.usd_compact(mcap, '?')} · liq {fmt.usd_compact(liq, '?') if liq is not None else 'n/a'}",
     ]
     if chart:
         lines.append(f"📈 {chart}")
@@ -230,14 +183,14 @@ def _dedup_check_send(wallet: str, ca: str, pair, now=None):
                           if ts - v[0] >= max(win, 1)]:
                     del _alert_dedup[k]
             _alert_dedup[key] = (ts, 0)
-        labels = _insider_labels({wallet.lower()} if wallet else set())
+        labels = db.insider_labels({wallet.lower()} if wallet else set())
         return _insider_alert_text(
-            pair, ca, _short_wallet(wallet, labels),
+            pair, ca, fmt.short_addr(wallet, labels),
             extra_buys=extra if win else 0, dedup_window_sec=win)
     except Exception as e:
         print(f"[insider] dedup check fail: {e}")
-        labels = _insider_labels({(wallet or "").lower()} if wallet else set())
-        return _insider_alert_text(pair, ca, _short_wallet(wallet, labels))
+        labels = db.insider_labels({(wallet or "").lower()} if wallet else set())
+        return _insider_alert_text(pair, ca, fmt.short_addr(wallet, labels))
 
 
 async def _alert_after_retry(token_ca: str, insider_addr: str,
@@ -259,9 +212,9 @@ async def _alert_after_retry(token_ca: str, insider_addr: str,
                   f"tetap tak ter-index Dexscreener — alert dibatalkan "
                   f"(wallet {insider_addr or '?'}, hanya di log).")
             return
-        labels = _insider_labels(
+        labels = db.insider_labels(
             {insider_addr.lower()} if insider_addr else set())
-        wallet_label = _short_wallet(insider_addr, labels)
+        wallet_label = fmt.short_addr(insider_addr, labels)
         text = _dedup_check_send(insider_addr, token_ca, pair)
         if text is None:
             print(f"[insider] dedup: {token_ca[:10]}… ditahan (retry)")
@@ -327,8 +280,8 @@ async def process_insider_buy(token_ca: str, insider_addr: str = "",
             print(f"[insider] retry fail (no loop): {e} — "
                   f"CA {token_ca} wallet {insider_addr or '?'} tak teralert.")
         return
-    labels = _insider_labels({insider_addr.lower()} if insider_addr else set())
-    wallet_label = _short_wallet(insider_addr, labels)
+    labels = db.insider_labels({insider_addr.lower()} if insider_addr else set())
+    wallet_label = fmt.short_addr(insider_addr, labels)
     text = _dedup_check_send(insider_addr, token_ca, pair)
     if text is None:
         print(f"[insider] dedup: {wallet_label} beli {token_ca[:10]}… "

@@ -34,6 +34,8 @@ import time
 from hexbytes import HexBytes
 from web3 import Web3
 
+from .hexutil import topic_addr
+
 # ===================== Alamat kanonik (verified on-chain, JANGAN diubah) ====
 POOL_MANAGER = "0x8366a39CC670B4001A1121B8F6A443A643e40951"
 UNIVERSAL_ROUTER = "0x8876789976decbfcbbbe364623c63652db8c0904"
@@ -177,8 +179,8 @@ def _to_params(log):
             h = t.hex() if hasattr(t, "hex") else str(t)
         except Exception:
             return None
-    c0 = _topic_addr(topics[2])
-    c1 = _topic_addr(topics[3])
+    c0 = topic_addr(topics[2])
+    c1 = topic_addr(topics[3])
     data = log.get("data") or "0x" + "0" * 64 * 5
     try:
         from eth_abi import decode
@@ -192,17 +194,6 @@ def _to_params(log):
         return None
     return _PoolKeyWithBlock(c0, c1, fee, tickSpacing, hooks,
                              int(log.get("blockNumber") or 0))
-
-
-def _topic_addr(topic):
-    if hasattr(topic, "hex"):
-        h = topic.hex()
-    else:
-        h = str(topic)
-    h = h.lower()
-    if not h.startswith("0x"):
-        h = "0x" + h
-    return "0x" + h[-40:]
 
 
 class _PoolKeyWithBlock:
