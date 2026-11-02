@@ -122,7 +122,7 @@ SETTING_DEFAULTS = {
     "agent_dry_run":  "1",
     "agent_max_drift": "0.50",
     # model yang tersedia di gateway 9router (claude-haiku-4-5 sudah 404)
-    "agent_model":    "groq/openai/gpt-oss-120b",
+    "agent_model":    "cmc/deepseek/deepseek-v4-flash",
     "agent_size_mult_max": "2",
     "agent_review_min": "10",
     "agent_auto_insting": "1",
@@ -201,7 +201,7 @@ SETTING_DEFAULTS = {
     # trader.buy — token pre-graduasi mustahil dibeli lewat jalur ini.
     "pons_radar_on":               "0",   # 1 = radar hidup
     "pons_llm_on":                 "1",   # tier LLM sebagai hakim akhir
-    "pons_llm_model":              "groq/openai/gpt-oss-120b",  # terverifikasi: JSON valid ~1,1 s
+    "pons_llm_model":              "cmc/deepseek/deepseek-v4-flash",  # terukur: JSON valid ~1,5-2,2 s
     "pons_last_block":             "0",   # watermark getLogs (dikelola radar)
     "pons_max_per_cycle":          "25",  # kandidat diproses per siklus
     "pons_enrich_concurrency":     "5",   # panggilan RPC paralel saat enrich
