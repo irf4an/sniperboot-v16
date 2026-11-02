@@ -436,7 +436,7 @@ class FakeERC20Full:
         return 18
 
 
-async def _fake_gate_ok(ca, pair):
+async def _fake_gate_ok(ca, pair, *args, **kwargs):
     """Fast-path gate selalu lolos — yang diuji di sini adalah jalur paper
     (quote on-chain, mcap guard), bukan ambang Goldilocks."""
     return (True, "ok", {"liq": 5000.0, "mcap": 1000.0,

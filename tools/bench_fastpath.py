@@ -57,13 +57,13 @@ async def main():
         print(f"  safety.check#2 : {ms(t0):7.0f} ms  (tanpa cache → biaya diulang)")
 
         t0 = time.time()
-        okf, tag, metr = await listener._fastpath_gate(ca, pair)
+        okf, tag, metr = await listener._fastpath_gate(ca, pair, safety_result=(ok, reason))
         d_gate = ms(t0)
-        print(f"  _fastpath_gate : {d_gate:7.0f} ms  lolos={okf} tag={tag}")
+        print(f"  _fastpath_gate : {d_gate:7.0f} ms  (reuse safety_result!) lolos={okf} tag={tag}")
         print(f"  metrik: liq={metr.get('liq')} mcap_onchain={metr.get('mcap_onchain')} "
               f"umur={metr.get('pool_age')} ratio={metr.get('ratio')}")
         print(f"  → total dari pair diketahui s/d keputusan: "
-              f"{d_safety + d_gate:.0f} ms (safety dihitung 2x oleh pipa)")
+              f"{d_safety + d_gate:.0f} ms (safety dipanggil 1x)")
 
 
 asyncio.run(main())

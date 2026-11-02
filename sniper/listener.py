@@ -376,7 +376,7 @@ def should_notify_fast_skip(tag: str) -> bool:
     return not (tag or "").startswith(SILENT_FAST_SKIP_PREFIXES)
 
 
-async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
+async def _fastpath_gate(ca, pair, safety_result=None) -> tuple[bool, str, dict]:
     """Gate lengkap fast-path (bagian I/O): safety dev/top10/honeypot +
     quote on-chain mcap guard. Return (lolos, skip_tag, metrik goldilocks).
 
@@ -392,17 +392,21 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
     base = base or {}
 
     # ---- c. safety guard (bytecode honeypot + dev + top10) ----
-    ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
+    if safety_result is not None:
+        ok, reason = safety_result
+    else:
+        ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
+
+    # Ekstrak dev_pct / top10_pct dari reason (lolos maupun gagal)
+    m_dev = re.search(r"dev\s+(?:pegang\s+)?([\d\.]+)%", reason)
+    if m_dev:
+        base["dev_pct"] = float(m_dev.group(1))
+    m_top = re.search(r"top10\s+(?:holders\s+pegang\s+)?([\d\.]+)%", reason)
+    if m_top:
+        base["top10_pct"] = float(m_top.group(1))
+
     if not ok:
         print(f"[fast-safety] {ca[:10]}: {reason}")
-        # Ekstrak dev_pct / top10_pct dari reason jika ada
-        m_dev = re.search(r"dev pegang ([\d\.]+)%", reason)
-        if m_dev:
-            base["dev_pct"] = float(m_dev.group(1))
-        m_top = re.search(r"top10 holders pegang ([\d\.]+)%", reason)
-        if m_top:
-            base["top10_pct"] = float(m_top.group(1))
-
         # Jika dev_pct belum terisi, coba ambil best effort on-chain
         if base.get("dev_pct") is None:
             try:
@@ -641,17 +645,11 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         await _notify_log(f"🌐 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{soc_reason}")
         return "filtered:social"
 
-    ok, reason = await asyncio.to_thread(safety.check, _trader, ca, pair)
-    if not ok:
-        print(f"[safety-skip] {sym}: {reason}")
-        await _notify_log(f"🛡 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{reason}")
-        return "filtered:safety"
-
     # ---------- 🚫 VETO RADAR PONS (0 ms, pra-graduasi) ----------
     # Radar menilai koin saat masih di bonding curve. Koin yang ditolak
     # (LLM BUANG / skor di bawah ambang) masuk set veto di memori. Dicek
-    # SEBELUM gate matematika: kalau koinnya sudah dinilai buruk, tidak
-    # perlu hitung liq/mcap/quote sama sekali.
+    # SEBELUM safety & gate matematika: kalau koinnya sudah dinilai buruk, tidak
+    # perlu panggil RPC/Blockscout sama sekali.
     if pons_veto(ca):
         print(f"[pons-veto] {sym}: ditolak Radar Pons saat pra-graduasi")
         await _notify_log(
@@ -661,17 +659,19 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
             f"_(fast-path tidak dijalankan)_")
         return "skip_pons_veto"
 
+    ok_safety, reason_safety = await asyncio.to_thread(safety.check, _trader, ca, pair)
+    if not ok_safety:
+        print(f"[safety-skip] {sym}: {reason_safety}")
+        await _notify_log(f"🛡 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{reason_safety}")
+        return "filtered:safety"
+
     # ---------- ⚡ FAST-PATH GOLDILOCKS (0 detik LLM, satu-satunya jalur) ----
     # Evaluasi murni matematika/bytecode: umur pool → liq/mcap → safety →
     # quote on-chain (slippage ≤ 15%, mcap on-chain ≤ scanner_mcap_max).
     # Lolos semua gate → keputusan sintetis conviction 90 → eksekusi di
     # alur bawah (dry_run_simulated ATAU live buy) seperti biasa.
-    #
-    # Mode MATA (LLM memutuskan entry) DIHAPUS: 701 keputusan historis 100%
-    # FAST-PATH, nol eksekusi LLM, dan latency 3–8 s = 17–35 block. Veto
-    # entry sekarang dipegang Radar Pons lewat `pons_veto(ca)` di atas.
     decision = None
-    ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair)
+    ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair, safety_result=(ok_safety, reason_safety))
     if not ok_f:
         print(f"[fast-skip] {sym}: {tag_f}")
         if should_notify_fast_skip(tag_f):

@@ -119,12 +119,10 @@ unzip hoodsniper.zip && cd hoodsniper2
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
-# ambil alamat Uniswap untuk Robinhood Chain (4663)
-npm i @uniswap/sdk-core
-node tools/fetch_addresses.mjs
-# copy SWAP_ROUTER02 & V2_ROUTER yang muncul ke .env nanti
-# kalau chain 4663 belum ada di SDK, ambil manual dari halaman
-# "Uniswap Protocol deployment addresses"
+# Uniswap v4 sudah pre-konfigurasi untuk Robinhood Chain (4663):
+# PoolManager: 0x8366a39cc670b4001a1121b8f6a443a643e40951
+# StateView: 0x76251b689254884c59ff10188d3ca346765da7aa
+# Universal Router & Permit2 sudah terpasang otomatis di sniper/v4.py.
 ```
 
 ---
@@ -144,9 +142,9 @@ RPC_URL=https://rpc.mainnet.chain.robinhood.com   # ganti dedicated kalau kena r
 CHAIN_ID=4663
 PRIVATE_KEY=            # wallet AGENT — bukan wallet utama!
 
-# ===== Uniswap (dari node tools/fetch_addresses.mjs) =====
-SWAP_ROUTER02=
-V2_ROUTER=
+# ===== Uniswap (Opsional - v4 sudah hardcoded) =====
+# SWAP_ROUTER02=        # hanya fallback lama
+# V2_ROUTER=
 
 # ===== Telegram userbot =====
 TG_API_ID=             # my.telegram.org
