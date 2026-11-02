@@ -123,11 +123,25 @@ def init():
             alerted_at INTEGER,
             block_buy INTEGER DEFAULT 0)""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_status ON pons_queue(status)")
-        # Migrasi aditif: DB yang dibuat sebelum kolom `block_buy` ada.
+        # Migrasi aditif: DB yang dibuat sebelum kolom `block_buy` & curve metrics ada.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(pons_queue)")}
         if "block_buy" not in cols:
             c.execute("ALTER TABLE pons_queue ADD COLUMN block_buy INTEGER DEFAULT 0")
+        curve_cols = {
+            "progress": "REAL DEFAULT 0.0",
+            "volume_usd": "REAL DEFAULT 0.0",
+            "trade_count": "INTEGER DEFAULT 0",
+            "market_cap_usd": "REAL DEFAULT 0.0",
+            "raised_eth": "REAL DEFAULT 0.0",
+            "creator_tax_bps": "INTEGER DEFAULT 0",
+            "socials": "TEXT DEFAULT ''",
+            "queued_at": "INTEGER DEFAULT 0",
+        }
+        for col_name, col_def in curve_cols.items():
+            if col_name not in cols:
+                c.execute(f"ALTER TABLE pons_queue ADD COLUMN {col_name} {col_def}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_launch_ts ON pons_queue(launch_ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pons_progress ON pons_queue(progress)")
         for k, v in config.SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
         # v16.5 (Solusi B): migrasi DB lama — longgarkan slippage anchor
@@ -1024,7 +1038,9 @@ def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) 
 # ikut masuk pipa listener.process_ca / trader.buy.
 _PONS_UPDATABLE = {"symbol", "name", "total_supply", "status", "score",
                    "verdict", "reason", "llm_model", "checked_at", "alerted_at",
-                   "block_buy"}
+                   "block_buy", "progress", "volume_usd", "trade_count",
+                   "market_cap_usd", "raised_eth", "creator_tax_bps", "socials",
+                   "queued_at"}
 
 
 def add_pons_token(ca, deployer=None, curve=None, launch_block=0, launch_ts=0) -> bool:
@@ -1048,6 +1064,65 @@ def add_pons_token(ca, deployer=None, curve=None, launch_block=0, launch_ts=0) -
         return cur.rowcount > 0
 
 
+def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
+                                launch_ts=0, symbol="", name="", total_supply=0.0,
+                                progress=0.0, volume_usd=0.0, trade_count=0,
+                                market_cap_usd=0.0, raised_eth=0.0,
+                                creator_tax_bps=0, socials="") -> bool:
+    """Catat atau perbarui kandidat kurva Pons V2 dari API.
+
+    Jika CA belum pernah tercatat: INSERT status='new'.
+    Jika CA sudah ada: update data progress, volume, trade, dll.
+    Jika status sebelumnya 'expired' (bukan alerted / block_buy=1),
+    kembalikan ke 'new' agar dinilai ulang bila progress naik.
+    Return True jika baris baru atau status kembali ke 'new'.
+    """
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return False
+    now = int(time.time())
+    with _lock, _conn() as c:
+        row = c.execute("SELECT status, block_buy FROM pons_queue WHERE ca=?", (ca,)).fetchone()
+        if not row:
+            c.execute(
+                """INSERT INTO pons_queue
+                   (ca, deployer, curve, launch_block, launch_ts, symbol, name,
+                    total_supply, progress, volume_usd, trade_count,
+                    market_cap_usd, raised_eth, creator_tax_bps, socials, queued_at, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')""",
+                (ca, (deployer or "").strip().lower() or None,
+                 (curve or "").strip().lower() or None,
+                 int(launch_block or 0), int(launch_ts or 0),
+                 symbol or "", name or "", float(total_supply or 0.0),
+                 float(progress or 0.0), float(volume_usd or 0.0),
+                 int(trade_count or 0), float(market_cap_usd or 0.0),
+                 float(raised_eth or 0.0), int(creator_tax_bps or 0),
+                 socials or "", now))
+            return True
+        st = row["status"]
+        bb = row["block_buy"]
+        new_status = st
+        reset = False
+        if st in ("expired", "rejected") and bb != 1:
+            new_status = "new"
+            reset = True
+        c.execute(
+            """UPDATE pons_queue SET
+               progress=?, volume_usd=?, trade_count=?, market_cap_usd=?,
+               raised_eth=?, creator_tax_bps=?, socials=?,
+               symbol=COALESCE(NULLIF(?, ''), symbol),
+               name=COALESCE(NULLIF(?, ''), name),
+               status=?,
+               queued_at=CASE WHEN ?='new' AND status!='new' THEN ? ELSE queued_at END
+               WHERE ca=?""",
+            (float(progress or 0.0), float(volume_usd or 0.0),
+             int(trade_count or 0), float(market_cap_usd or 0.0),
+             float(raised_eth or 0.0), int(creator_tax_bps or 0),
+             socials or "", symbol or "", name or "", new_status,
+             new_status, now, ca))
+        return reset
+
+
 def update_pons_token(ca, **fields):
     """Update kolom pons_queue yang diizinkan saja (whitelist _PONS_UPDATABLE)."""
     kv = {k: v for k, v in fields.items() if k in _PONS_UPDATABLE}
@@ -1060,11 +1135,11 @@ def update_pons_token(ca, **fields):
 
 
 def get_pons_pending(limit=50) -> list:
-    """Antrean yang belum diputuskan, urut paling tua dulu (FIFO)."""
+    """Antrean yang belum diputuskan, prioritas progress kurva tertinggi."""
     with _lock, _conn() as c:
         return [dict(r) for r in c.execute(
             "SELECT * FROM pons_queue WHERE status='new' "
-            "ORDER BY launch_ts ASC LIMIT ?", (int(limit),))]
+            "ORDER BY progress DESC, launch_ts ASC LIMIT ?", (int(limit),))]
 
 
 def reject_pons(ca, reason, status="rejected", score=0, verdict="BUANG",
@@ -1108,8 +1183,11 @@ def expire_pons_queue(max_age_sec=3600) -> int:
     cutoff = int(time.time()) - int(max_age_sec)
     with _lock, _conn() as c:
         cur = c.execute(
-            "UPDATE pons_queue SET status='expired' "
-            "WHERE status='new' AND launch_ts > 0 AND launch_ts < ?", (cutoff,))
+            """UPDATE pons_queue SET status='expired'
+               WHERE status='new' AND (
+                   (queued_at > 0 AND queued_at < ?) OR
+                   (queued_at = 0 AND launch_ts > 0 AND launch_ts < ?)
+               )""", (cutoff, cutoff))
         return cur.rowcount
 
 

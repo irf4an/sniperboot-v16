@@ -31,6 +31,7 @@ import asyncio
 import json
 import threading
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import agent, config, db
@@ -238,11 +239,33 @@ def compose_alert(rec: dict) -> str:
     dev_launches = rec.get("deployer_launches")
     age = rec.get("age_sec")
     block = rec.get("launch_block") or 0
+    prog = rec.get("progress")
+    raised = rec.get("raised_eth")
+    vol = rec.get("volume_usd")
+    trades = rec.get("trade_count")
+    mcap = rec.get("market_cap_usd")
+    tax = rec.get("creator_tax_bps")
 
-    head = f"📡 **RADAR PONS — SINYAL AWAL**\n**{sym}**"
+    head_label = "KANDIDAT GRADUASI" if prog is not None and float(prog) > 0 else "SINYAL AWAL"
+    head = f"📡 **RADAR PONS — {head_label}**\n**{sym}**"
     if name and name.strip().lower() != str(sym).lower():
         head += f" · {name}"
     lines = [head, f"`{ca}`", ""]
+
+    if prog is not None and float(prog) > 0:
+        pct = round(float(prog) * 100, 1)
+        r_str = f"{float(raised):.2f}" if raised is not None else "?"
+        lines.append(f"🔥 Kurva **{pct}%** ({r_str}/4.2 ETH)")
+    if vol or trades or mcap:
+        m_parts = []
+        if vol:
+            m_parts.append(f"Vol ${float(vol):,.0f}")
+        if trades:
+            m_parts.append(f"{int(trades):,} trade")
+        if mcap:
+            m_parts.append(f"MCap ${float(mcap):,.0f}")
+        lines.append("📊 " + " · ".join(m_parts))
+
     if score is not None:
         lines.append(f"🧠 skor **{int(score)}** · verdict **{verdict}**")
     if reason:
@@ -250,6 +273,8 @@ def compose_alert(rec: dict) -> str:
     if dep:
         short = dep[:6] + "…" + dep[-4:]
         dev_line = f"👤 dev `{short}`"
+        if tax is not None:
+            dev_line += f" · Tax {float(tax)/100:.1f}%"
         if dev_launches is not None:
             dev_line += f" · {int(dev_launches)} launch/jam"
         lines.append(dev_line)
@@ -260,7 +285,10 @@ def compose_alert(rec: dict) -> str:
         meta.append(f"blok {int(block)}")
     if meta:
         lines.append("🕒 " + " · ".join(meta))
-    lines.append("📈 pool v4 belum ada — pantau graduasi")
+    if prog is not None and float(prog) > 0:
+        lines.append("📈 pool v4 segera dibuka — pantau graduasi")
+    else:
+        lines.append("📈 pool v4 belum ada — pantau graduasi")
     lines.append("_alert-only: bot tidak membeli otomatis_")
     return "\n".join(lines)
 
@@ -284,12 +312,85 @@ def compose_digest(rows) -> str | None:
 def _explorer_buttons(ca):
     try:
         from telethon import Button
-        return [[Button.url("🔍 Explorer", f"{config.EXPLORER_URL}/token/{ca}")]]
+        return [
+            [
+                Button.url("🚀 Pons", f"https://ponsfamily.com/launchpad/{ca}"),
+                Button.url("🔍 Explorer", f"{config.EXPLORER_URL}/token/{ca}")
+            ]
+        ]
     except Exception:
         return None
 
 
-# ==================== I/O: RPC ====================
+# ==================== I/O: API Kurva Pons & RPC ====================
+def fetch_curve_candidates(url=None) -> list:
+    """Tarik daftar kandidat kurva Pons V2 dari API."""
+    target_url = url or db.get("pons_api_url", str) or "https://ponsfamily.com/api/launches?stage=curve&sort=progress"
+    req = urllib.request.Request(
+        target_url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; Hoodsniper/16.10)"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data.get("items") or []
+    except Exception as e:
+        print(f"[pons-radar] fetch API kurva gagal (lanjut): {e}")
+    return []
+
+
+def scan_curve_progress() -> int:
+    """Ambil kandidat dari API Pons, saring progress >= pons_min_progress."""
+    items = fetch_curve_candidates()
+    if not items:
+        return 0
+    try:
+        min_prog = float(db.get("pons_min_progress", float) or 0.75)
+    except (TypeError, ValueError):
+        min_prog = 0.75
+
+    new_count = 0
+    now = int(time.time())
+    for item in items:
+        try:
+            prog = float(item.get("progress") or 0.0)
+            if prog < min_prog:
+                # API di-sort by progress DESC; sisa item di belakang pasti < min_prog
+                break
+            ca = (item.get("address") or "").strip().lower()
+            if not ca:
+                continue
+            deployer = (item.get("deployer") or "").strip().lower()
+            curve = (item.get("curve") or "").strip().lower()
+            symbol = str(item.get("symbol") or "")[:32]
+            name = str(item.get("name") or "")[:64]
+            total_supply = float(item.get("totalSupply") or 0.0)
+            launch_block = int(item.get("launchedBlock") or item.get("deployedBlock") or 0)
+            created_at = int(item.get("createdAt") or now)
+            raised = float(item.get("raisedQuote") or 0.0)
+            vol = float(item.get("volumeUsd") or 0.0)
+            trades = int(item.get("tradeCount") or 0)
+            mcap = float(item.get("marketCapUsd") or 0.0)
+            tax = int(item.get("creatorTaxBps") or 0)
+            socials = json.dumps(item.get("socials") or {})
+
+            if db.upsert_pons_curve_candidate(
+                ca=ca, deployer=deployer, curve=curve, launch_block=launch_block,
+                launch_ts=created_at, symbol=symbol, name=name,
+                total_supply=total_supply, progress=prog, volume_usd=vol,
+                trade_count=trades, market_cap_usd=mcap, raised_eth=raised,
+                creator_tax_bps=tax, socials=socials
+            ):
+                new_count += 1
+        except Exception as e:
+            print(f"[pons-radar] parse item kurva error: {e}")
+            continue
+    if new_count:
+        print(f"[pons-radar] {new_count} kandidat kurva baru (progress >= {min_prog*100:.0f}%)")
+    return new_count
+
+
 def _w3():
     """Web3 read-only, di-cache 5 menit. Gagal → None (tidak raise)."""
     now = time.time()
@@ -407,10 +508,11 @@ def enrich_token(ca: str) -> dict | None:
 
 # ==================== tier LLM ====================
 _LLM_SYSTEM = (
-    "Kamu penyaring launchpad meme coin on-chain. Tugasmu menilai apakah "
-    "token yang baru lahir di bonding curve layak dikirim sebagai ALERT AWAL "
-    "ke trader. Tidak ada data harga/pool — nilai dari nama, simbol, rekam "
-    "jejak deployer, dan sinyal spam.\n"
+    "Kamu kurator launchpad meme coin on-chain Pons V2. Tugasmu menilai apakah "
+    "token yang mendekati graduasi bonding curve (target 4.2 ETH) layak dikirim "
+    "sebagai ALERT PRA-GRADUASI ke trader. Nilai dari nama/simbol, progress kurva, "
+    "volume/transaksi riil, creator tax, dan rekam jejak deployer.\n"
+    "Bila ada indikasi nama gibberish, dev spammer, atau tax berbahaya, beri verdict BUANG.\n"
     "ATURAN KERAS: balas HANYA satu objek JSON. Jangan menulis analisis, "
     "jangan pakai markdown, karakter pertama WAJIB '{'.\n"
     'Skema: {"verdict":"AMAN|WASPADA|BUANG","score":0-100,"reason":"<=18 kata"}\n'
@@ -447,6 +549,18 @@ def llm_verdict(rec: dict) -> dict:
         "heuristic_score": rec.get("heur_score"),
         "heuristic_notes": rec.get("heur_notes"),
     }
+    if rec.get("progress") is not None:
+        payload["curve_progress_pct"] = round(float(rec["progress"]) * 100, 1)
+    if rec.get("raised_eth") is not None:
+        payload["raised_eth"] = round(float(rec["raised_eth"]), 2)
+    if rec.get("volume_usd") is not None:
+        payload["volume_usd"] = round(float(rec["volume_usd"]))
+    if rec.get("trade_count") is not None:
+        payload["trade_count"] = int(rec["trade_count"])
+    if rec.get("market_cap_usd") is not None:
+        payload["market_cap_usd"] = round(float(rec["market_cap_usd"]))
+    if rec.get("creator_tax_bps") is not None:
+        payload["creator_tax_pct"] = round(float(rec["creator_tax_bps"]) / 100, 1)
     body = json.dumps(payload)
     d = None
     for attempt in (1, 2):
@@ -506,7 +620,9 @@ def process_candidates(batch) -> list:
     """
     if not batch:
         return []
-    enriched = _enrich_many(batch, db.get("pons_enrich_concurrency", int))
+    # Token yang belum punya symbol & name di-enrich via RPC
+    need_enrich = [r for r in batch if not r.get("symbol") or not r.get("name")]
+    enriched = _enrich_many(need_enrich, db.get("pons_enrich_concurrency", int)) if need_enrich else {}
     min_score = int(db.get("pons_alert_min_score", int))
     cap = int(db.get("pons_alert_max_per_hour", int))
     cap_left = None
@@ -516,9 +632,7 @@ def process_candidates(batch) -> list:
     now = int(time.time())
     alerts = []
 
-    # PASS 1 — simpan nama/simbol lebih dulu. Tanpa ini, klaster nama tidak
-    # pernah terdeteksi di dalam satu batch: token pertama melihat 0, token
-    # kedua melihat 1, dst., padahal 4 koin bisa muncul di batch yang sama.
+    # PASS 1 — simpan nama/simbol lebih dulu bila ada enrich RPC.
     for rec in batch:
         data = enriched.get(rec["ca"])
         if data:
@@ -530,11 +644,14 @@ def process_candidates(batch) -> list:
     for rec in batch:
         ca = rec["ca"]
         data = enriched.get(ca)
-        if not data:
+        symbol = (rec.get("symbol") or (data.get("symbol") if data else "") or "").strip()
+        name = (rec.get("name") or (data.get("name") if data else "") or "").strip()
+        total_supply = rec.get("total_supply") or (data.get("total_supply") if data else 0.0)
+
+        if not symbol and not name:
             db.reject_pons(ca, "rpc_gagal: kontrak tidak menjawab name/symbol",
                            score=0)
             continue
-        symbol, name = data.get("symbol") or "", data.get("name") or ""
         cluster = db.pons_name_cluster(_norm_name(name), cluster_since) if name else 0
         cluster = max(0, cluster - 1)  # jangan hitung token ini sendiri
         hist = db.pons_deployer_history(rec.get("deployer"))
@@ -544,7 +661,7 @@ def process_candidates(batch) -> list:
         work = dict(rec)
         work.update({
             "symbol": symbol, "name": name,
-            "total_supply": data.get("total_supply"),
+            "total_supply": total_supply,
             "deployer_launches": hist.get("launches", 0),
             "name_cluster": cluster,
             "heur_score": heur, "heur_notes": notes,
@@ -575,7 +692,7 @@ def process_candidates(batch) -> list:
             continue
         if cap_left is not None and cap_left <= 0:
             db.reject_pons(ca, "cap alert per jam penuh", score=work["score"],
-                           verdict=work["verdict"])
+                           verdict=work["verdict"], llm_model=work.get("llm_model"))
             continue
         # Simpan hasil penilaian walau pengiriman Telegram nanti gagal —
         # baris tetap status 'new' supaya dicoba lagi siklus berikutnya, tapi
@@ -622,7 +739,7 @@ async def radar_loop():
             if _notify_cb is None:
                 await asyncio.sleep(15)
                 continue
-            await asyncio.to_thread(scan_new_launches)
+            await asyncio.to_thread(scan_curve_progress)
             db.expire_pons_queue(int(db.get("pons_queue_ttl_sec", int)))
             batch = db.get_pons_pending(int(db.get("pons_max_per_cycle", int)))
             if batch:
@@ -637,8 +754,9 @@ async def radar_loop():
                             verdict=rec.get("verdict"),
                             reason=rec.get("reason"),
                             llm_model=rec.get("llm_model"))
+                        prog_info = f" kurva {round((rec.get('progress') or 0)*100)}%" if rec.get("progress") else ""
                         print(f"[pons-radar] ALERT {rec.get('symbol')} "
-                              f"({rec['ca'][:12]}…) skor {rec.get('score')}")
+                              f"({rec['ca'][:12]}…) skor {rec.get('score')}{prog_info}")
                 print(f"[pons-radar] diproses={len(batch)} alert={len(alerts)}")
             await asyncio.sleep(20)
         except asyncio.CancelledError:

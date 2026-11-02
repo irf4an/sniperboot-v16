@@ -200,6 +200,8 @@ SETTING_DEFAULTS = {
     # DM admin. Radar ini TIDAK PERNAH memanggil listener.process_ca atau
     # trader.buy — token pre-graduasi mustahil dibeli lewat jalur ini.
     "pons_radar_on":               "0",   # 1 = radar hidup
+    "pons_min_progress":           "0.75",# minimal progress kurva (0.75 = 75%)
+    "pons_api_url":                "https://ponsfamily.com/api/launches?stage=curve&sort=progress",
     "pons_llm_on":                 "1",   # tier LLM sebagai hakim akhir
     "pons_llm_model":              "cmc/deepseek/deepseek-v4-flash",  # terukur: JSON valid ~1,5-2,2 s
     "pons_last_block":             "0",   # watermark getLogs (dikelola radar)
@@ -283,6 +285,8 @@ SETTING_LABELS = {
     "clone_max_entries_per_day": "🛡 Clone guard: maks entry per keluarga operator",
     "clone_entry_window_hours":  "🛡 Clone guard: jendela hitung entry (jam)",
     "pons_radar_on":             "📡 Radar Pons V2: alert awal pre-graduasi (1/0)",
+    "pons_min_progress":         "🎯 Radar Pons: minimal progress kurva (0.10 - 0.95)",
+    "pons_api_url":              "🌐 Radar Pons: endpoint API kurva Pons",
     "pons_llm_on":               "🧠 Radar Pons: saring pakai LLM (1/0)",
     "pons_llm_model":            "🤖 Radar Pons: model LLM (kosong = agent_model)",
     "pons_alert_min_score":      "🎚 Radar Pons: skor minimal alert (0-100)",

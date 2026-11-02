@@ -358,5 +358,77 @@ class TestVetoBridge(unittest.TestCase):
             self.assertFalse(listener.pons_veto(ca))  # fail-open
 
 
+class TestCurveIntake(unittest.TestCase):
+    """Pengujian intake kurva Pons V2: API progress filter & alert format."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        self.tmp.close()
+        self.old_db_path = config.DB_PATH
+        config.DB_PATH = self.db_path
+        db.init()
+        db.set_("pons_min_progress", "0.75")
+
+    def tearDown(self):
+        config.DB_PATH = self.old_db_path
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+
+    def test_scan_curve_progress_filters_threshold(self):
+        fake_items = [
+            {"address": "0x" + "11" * 20, "symbol": "HIGH", "name": "High Progress",
+             "progress": 0.85, "raisedQuote": 3.5, "volumeUsd": 12000, "tradeCount": 150},
+            {"address": "0x" + "22" * 20, "symbol": "BORDER", "name": "Borderline",
+             "progress": 0.75, "raisedQuote": 3.15, "volumeUsd": 8000, "tradeCount": 90},
+            {"address": "0x" + "33" * 20, "symbol": "LOW", "name": "Low Progress",
+             "progress": 0.50, "raisedQuote": 2.1, "volumeUsd": 3000, "tradeCount": 40},
+            {"address": "0x" + "44" * 20, "symbol": "ZERO", "name": "Zero Progress",
+             "progress": 0.0, "raisedQuote": 0.0, "volumeUsd": 0, "tradeCount": 0},
+        ]
+        with mock.patch.object(pons_radar, "fetch_curve_candidates", return_value=fake_items):
+            count = pons_radar.scan_curve_progress()
+        self.assertEqual(count, 2)  # hanya HIGH (0.85) dan BORDER (0.75) yang lolos
+        pending = db.get_pons_pending()
+        self.assertEqual(len(pending), 2)
+        symbols = [p["symbol"] for p in pending]
+        self.assertIn("HIGH", symbols)
+        self.assertIn("BORDER", symbols)
+        self.assertNotIn("LOW", symbols)
+        self.assertNotIn("ZERO", symbols)
+
+    def test_compose_alert_includes_curve_metrics(self):
+        rec = {
+            "ca": "0x" + "55" * 20,
+            "symbol": "BCAT",
+            "name": "Boo Cat",
+            "progress": 0.954,
+            "raised_eth": 4.01,
+            "volume_usd": 58500,
+            "trade_count": 1838,
+            "market_cap_usd": 44200,
+            "creator_tax_bps": 0,
+            "score": 85,
+            "verdict": "AMAN",
+            "reason": "momentum kuat mendekati graduasi",
+            "deployer": "0x" + "66" * 20,
+        }
+        text = pons_radar.compose_alert(rec)
+        self.assertIn("95.4%", text)
+        self.assertIn("4.01/4.2 ETH", text)
+        self.assertIn("58,500", text)
+        self.assertIn("1,838 trade", text)
+        self.assertIn("44,200", text)
+        self.assertIn("Tax 0.0%", text)
+        buttons = pons_radar._explorer_buttons(rec["ca"])
+        if buttons:
+            urls = []
+            for row in buttons:
+                for b in row:
+                    url = getattr(b, "url", None) or getattr(getattr(b, "type", None), "url", None) or ""
+                    urls.append(url)
+            self.assertTrue(any("ponsfamily.com/launchpad" in u for u in urls))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
