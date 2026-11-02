@@ -7,7 +7,6 @@ import asyncio
 import re
 import traceback
 from telethon import events, Button, utils
-from telethon.errors import MessageNotModifiedError
 from . import config, db, engine, agent, clone_guard
 
 _pending = {}  # admin_id -> action string ("add_source" | "set:key" | "insaddr")
@@ -611,11 +610,12 @@ def register(bot, trader, user_client=None):
         data = event.data.decode()
         try:
             await _route(event, data)
-        except MessageNotModifiedError:
-            # Konten panel sama persis (mis. tap Menu saat sudah di Menu) —
-            # bukan error, cukup diamkan tombolnya.
-            pass
         except Exception as e:
+            # Konten panel sama persis (mis. tap Menu saat sudah di Menu) —
+            # bukan error, cukup diamkan tombolnya. Dicek lewat nama kelas
+            # supaya modul ini tetap bisa di-import tanpa telethon asli.
+            if type(e).__name__ == "MessageNotModifiedError":
+                return
             traceback.print_exc()
             await event.answer(f"error: {e}"[:190], alert=True)
 
