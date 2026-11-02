@@ -353,8 +353,7 @@ check("notif memuat entry (on-chain quote)",
 # ====================================================================
 print("\n[3] PIPA ASLI listener.process_ca (mode latihan, quoter di-mock)")
 # Persis pipa production: agent skip-filter, safety dipanggil, dsb.
-db.set_("agent_on", "1")
-db.set_("agent_dry_run", "1")
+db.set_("agent_dry_run", "1")   # entry = FAST-PATH (mode MATA sudah dihapus)
 db.set_("social_filter", "off")
 db.set_("min_liq_usd", "100")
 db.set_("scanner_mcap_max", "99999")
@@ -417,13 +416,13 @@ _pair_qfail = {"pairAddress": "0PAIRFAIL" + "0" * 15, "chainId": "robinhood",
                "baseToken": {"symbol": "QF", "address": _ca},
                "quoteToken": {"symbol": "ETH"}}
 tools_saved = (listener.dx.best_pair, listener.dx.eth_usd, listener.dx.pool_type,
-               listener.safety.check, listener.agent.decide_entry)
+               listener.safety.check)
 
 import sniper.listener as L          # noqa: E402
 
 _orig_best_pair = dx.best_pair
 _orig_safety = L.safety.check
-_orig_agent = L.agent.decide_entry
+_orig_gate = L._fastpath_gate
 
 
 class FakeERC20Full:
@@ -437,15 +436,19 @@ class FakeERC20Full:
         return 18
 
 
-def setup_pipe(trader, quote_fn, pair, agent_action="BUY"):
-    """Panggil register pipa: best_pair, safety, agent, quoter di-stub."""
+async def _fake_gate_ok(ca, pair):
+    """Fast-path gate selalu lolos — yang diuji di sini adalah jalur paper
+    (quote on-chain, mcap guard), bukan ambang Goldilocks."""
+    return (True, "ok", {"liq": 5000.0, "mcap": 1000.0,
+                         "mcap_onchain": 1000.0, "ratio": 0.5,
+                         "pool_age": 60.0})
+
+
+def setup_pipe(trader, quote_fn, pair):
+    """Panggil register pipa: best_pair, safety, fast-path gate, quoter di-stub."""
     L.dx.best_pair = lambda ca: pair
     L.safety.check = lambda tr, ca, p: (True, "ok")
-    L.agent.decide_entry = (lambda *a, **k:
-                            {"action": agent_action, "conviction": 85,
-                             "size_mult": 1.0, "tp1": 0.5, "tp2": 1.0,
-                             "sl": -0.3, "reason": "r", "risks": ""}) \
-        if agent_action else (lambda *a, **k: None)
+    L._fastpath_gate = _fake_gate_ok
     trader.quote_buy_tokens = quote_fn
 
 
@@ -568,7 +571,7 @@ try:
 finally:
     L.dx.best_pair = _orig_best_pair
     L.safety.check = _orig_safety
-    L.agent.decide_entry = _orig_agent
+    L._fastpath_gate = _orig_gate
 
 # ====================================================================
 print()

@@ -219,7 +219,6 @@ with _p.object(listener, "_trader", MagicMock(w3=MagicMock())), \
         except Exception as e:
             return f"EXC:{e}"
     db.set_("scanner_on", "1")
-    db.set_("agent_on", "0")
     db.set_("agent_dry_run", "1")
     try:
         db.remove_pending_pool("test_liq0")

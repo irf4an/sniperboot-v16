@@ -118,15 +118,13 @@ SETTING_DEFAULTS = {
     "social_filter":      "any",   # off | any | x | tg | x_tg | web | count
     "social_min_count":   "1",     # min jumlah link sosmed (mode 'count')
     "social_fail_closed": "0",     # 1 = kalau info sosmed kosong/gagal → SKIP
-    "agent_on":       "0",
     "agent_manage_on": "0",
     "agent_dry_run":  "1",
     "agent_max_drift": "0.50",
-    "agent_model":    "claude-haiku-4-5",
+    # model yang tersedia di gateway 9router (claude-haiku-4-5 sudah 404)
+    "agent_model":    "groq/openai/gpt-oss-120b",
     "agent_size_mult_max": "2",
     "agent_review_min": "10",
-    "agent_min_conviction": "55",
-    "agent_blacklist": "1",
     "agent_auto_insting": "1",
     # ---- 🔭 Scanner (v16 gabungan): sumber sinyal KEDUA di samping listener grup.
     # Semantik mode menyusul v15: eksekusi diatur mode global (agent_dry_run
@@ -167,10 +165,10 @@ SETTING_DEFAULTS = {
     # ---- 🧪 Dompet kas virtual (paper trading mode latihan) ----
     "paper_initial_usd": "20.0",
     "paper_cash_usd":    "20.0",
-    # ---- ⚡ FAST-PATH Goldilocks Defensive (entry tanpa LLM) ----
-    # entry_mode: 'mata' = MATA (LLM memutuskan), 'fast' = evaluasi murni
-    # matematika/bytecode (0 detik LLM). Toggle via panel 🧠 Otak.
-    "entry_mode":                 "mata",
+    # ---- ⚡ FAST-PATH Goldilocks Defensive (SATU-SATUNYA jalur entry) ----
+    # Mode MATA (LLM memutuskan entry) dihapus: 701 keputusan historis 100%
+    # fast-path, nol eksekusi LLM, latency 3-8 s = 17-35 block. Veto entry
+    # sekarang dipegang Radar Pons (pons_blacklist, dibaca dari memori).
     "goldilocks_min_age_sec":     "10",
     "goldilocks_max_age_sec":     "300",
     "goldilocks_min_liq":         "4000.0",
@@ -252,7 +250,6 @@ SETTING_LABELS = {
     "social_fail_closed":"🌐 Skip kalau sosmed kosong (1/0)",
     "agent_size_mult_max": "🧠 Max size multiplier agent",
     "agent_review_min": "🧠 Interval review agent (menit)",
-    "agent_min_conviction": "👁 Min conviction buat entry (0-100)",
     "scanner_on":            "🔭 Scanner: analisa semua coin (1=ON) — sumber sinyal kedua",
     "scanner_interval_sec":  "🔭 Scanner: interval siklus (dtk)",
     "scanner_mcap_max":      "🔭 Scanner: maks mcap kandidat (USD)",
@@ -269,7 +266,6 @@ SETTING_LABELS = {
     "tracker_auto_rotate":   "🔄 Tracker: rotasi wallet insider otomatis 24h (1/0)",
     "insider_alert_only":    "🔔 Tracker insider: alert-only tanpa posisi (1) / ikut pakir (0)",
     "insider_alert_dedup_window_sec": "🧹 Dedup alert insider: jendela waktu (detik, 0=mati)",
-    "entry_mode":            "⚡ Mode entry (mata/fast)",
     "goldilocks_min_age_sec":     "⚡ Goldilocks: min umur pool (dtk)",
     "goldilocks_max_age_sec":     "⚡ Goldilocks: maks umur pool (dtk)",
     "goldilocks_min_liq":         "⚡ Goldilocks: min likuiditas (USD)",

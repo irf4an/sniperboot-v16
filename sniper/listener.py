@@ -214,28 +214,11 @@ def _n(x) -> str:
     return str(int(x)) if x is not None else "?"
 
 
-def _agent_card(pair, ca, src_name, decision, mode, min_conv=None) -> str:
-    """Kartu keputusan Mata dengan tata letak tetap:
+def _agent_card(pair, ca, src_name, decision) -> str:
+    """Kartu posisi SIMULASI (mode latihan) dengan tata letak tetap.
 
-    SEMUA teks yang di-render ke Telegram lewat sini sudah disanitasi
-    via agent.sanitize_text — teks bebas MATA tidak boleh membawa
-    kontrol/zero-width-char (anti spam & anti injeksi tampilan).
-
-    Layout kartu:
-        <header per mode>
-        `CA`
-        📊 Mcap .. · Liq .. (..% mcap) · Umur ..
-        📈 Harga m5 .. · h1 .. · B/S m5 ../.. · h1 ../..
-        🧭 **Analisa** · conviction N
-        • klausa alasan 1 (dipisah ';' dari prompt)
-        • klausa alasan 2
-        ⚠️ **Risiko:** ..
-        🎯 **Rencana:** ..       (khusus mode LATIHAN)
-        _(tidak dieksekusi ...)_ (khusus mode LATIHAN)
-
-    mode: "SKIP" | "RAGU" | "LATIHAN". Fungsi murni (tanpa I/O) —
-    bisa di-unit-test. Angka metrik dihitung dari pair, BUKAN dari
-    teks LLM, jadi selalu hadir dan selalu akurat.
+    Angka metrik dihitung dari pair, BUKAN dari teks LLM — jadi selalu
+    hadir dan selalu akurat. Fungsi murni (tanpa I/O), bisa di-unit-test.
     """
     sym = (pair.get("baseToken") or {}).get("symbol", "?")
     mcap_screen = dx.mcap_of(pair)
@@ -255,18 +238,9 @@ def _agent_card(pair, ca, src_name, decision, mode, min_conv=None) -> str:
     tx1 = txns.get("h1") or {}
     conv = decision.get("conviction", "?")
 
-    if mode == "LATIHAN":
-        entry_mode = db.get("entry_mode", str) or "fast"
-        prefix = "FAST-PATH" if entry_mode == "fast" else "MATA"
-        head = f"🧪 **MODE LATIHAN — {prefix} BUY {sym}** _via {src_name}_"
-    elif mode == "RAGU":
-        head = f"👁 **MATA RAGU → SKIP — {sym}** _via {src_name}_"
-    else:
-        head = f"👁 **MATA SKIP — {sym}** _via {src_name}_"
+    head = f"🧪 **MODE LATIHAN — FAST-PATH BUY {sym}** _via {src_name}_"
 
     lines = [head, f"`{ca}`"]
-    if mode == "RAGU" and min_conv is not None:
-        lines.append(f"⚖️ Conviction {conv} — di bawah ambang BUY {min_conv:.0f}")
     lines.append(
         f"📊 Mcap {_fmt_usd(mcap)} · {_fmt_liq(liq)}"
         + (f" ({liq_pct:.0f}% mcap)" if liq is not None and mcap > 0 else "")
@@ -285,14 +259,13 @@ def _agent_card(pair, ca, src_name, decision, mode, min_conv=None) -> str:
     risks = str(decision.get("risks") or "").strip()
     if risks:
         lines.append(f"⚠️ **Risiko:** {risks}")
-    if mode == "LATIHAN":
-        size = f"{float(decision.get('size_mult') or 1.0):.2f}".replace(".", ",")
-        lines.append(
-            f"🎯 **Rencana:** size {size}x · "
-            f"TP1 +{float(decision.get('tp1') or 0) * 100:.0f}% · "
-            f"TP2 +{float(decision.get('tp2') or 0) * 100:.0f}% · "
-            f"SL {float(decision.get('sl') or 0) * 100:.0f}%")
-        lines.append("_(tidak dieksekusi — mode latihan/dry-run)_")
+    size = f"{float(decision.get('size_mult') or 1.0):.2f}".replace(".", ",")
+    lines.append(
+        f"🎯 **Rencana:** size {size}x · "
+        f"TP1 +{float(decision.get('tp1') or 0) * 100:.0f}% · "
+        f"TP2 +{float(decision.get('tp2') or 0) * 100:.0f}% · "
+        f"SL {float(decision.get('sl') or 0) * 100:.0f}%")
+    lines.append("_(tidak dieksekusi — mode latihan/dry-run)_")
     return "\n".join(lines)
 
 
@@ -345,9 +318,9 @@ async def _handle(event, src):
             caller_name = getattr(sender, "username", None) or getattr(sender, "first_name", None)
     except Exception:
         pass
-    if db.get("agent_blacklist", str) == "1" and db.is_blacklisted(caller_id):
+    if db.is_blacklisted(caller_id):
         if CA_RE.search(event.raw_text or ""):
-            print(f"[blacklist-skip] call dari {caller_name or caller_id} diabaikan (di-blacklist Mata)")
+            print(f'[blacklist-skip] call dari {caller_name or caller_id} diabaikan (manual blacklist)')
         return
     text = event.raw_text or ""
     for ca in _extract_ca_strict(text):
@@ -383,7 +356,7 @@ def _extract_ca_strict(text) -> list:
 
 # =====================================================================
 #  ⚡ FAST-PATH GOLDILOCKS DEFENSIVE — evaluasi entry MURNI math/bytecode
-#  (0 detik LLM). Toggle via panel 🧠 Otak (setting 'entry_mode').
+#  (0 detik LLM). Tidak ada mode LLM di jalur entry — lihat pons_veto().
 #  Fungsi evaluasi murni (tanpa I/O) dipisah agar bisa di-unit-test;
 #  benda I/O (safety, quoter on-chain, notif) ada di _fastpath_gate.
 # =====================================================================
@@ -614,11 +587,11 @@ async def _fastpath_gate(ca, pair) -> tuple[bool, str, dict]:
 
 async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
                      retry=False):
-    """Proses SATU kandidat CA lewat pipa: filter → sosmed → safety → Mata → buy.
+    """Proses SATU kandidat CA lewat pipa: filter → sosmed → safety → veto radar → fast-path → buy.
 
     Dipakai listener (dari pesan grup) maupun scanner (sniper/scanner.py).
     allow_buy=False = PAGAR KERAS: setelah lolos semua tahap, buy TIDAK
-    dieksekusi lewat jalur mana pun (termasuk fallback rule-based saat Mata
+    dieksekusi lewat jalur mana pun (termasuk fallback rule-based bila
     mati/gagal) — fungsi berhenti di status "no_buy_scanner". Mekanisme ini
     TETAP TERSEDIA, tapi di v16 gabungan scanner TIDAK memakainya: scanner
     memanggil allow_buy=True dan eksekusi diatur mode global (agent_dry_run
@@ -729,90 +702,64 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
             f"_(fast-path tidak dijalankan)_")
         return "skip_pons_veto"
 
-    # ---------- ⚡ FAST-PATH GOLDILOCKS (entry_mode='fast', 0 detik LLM) ----
+    # ---------- ⚡ FAST-PATH GOLDILOCKS (0 detik LLM, satu-satunya jalur) ----
     # Evaluasi murni matematika/bytecode: umur pool → liq/mcap → safety →
     # quote on-chain (slippage ≤ 15%, mcap on-chain ≤ scanner_mcap_max).
     # Lolos semua gate → keputusan sintetis conviction 90 → eksekusi di
     # alur bawah (dry_run_simulated ATAU live buy) seperti biasa.
-    entry_mode = db.get("entry_mode", str) or "mata"
-    decision = None  # default None — fastpath/mata menimpanya saat aktif
-    if entry_mode == "fast":
-        ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair)
-        if not ok_f:
-            print(f"[fast-skip] {sym}: {tag_f}")
-            if should_notify_fast_skip(tag_f):
-                gl = _fmt_gate_metrics(metr_f)
-                await _notify_log(
-                    f"⚡ **FAST-PATH SKIP {sym}** _via {src['name']}_\n"
-                    f"`{ca}`\nreason: {tag_f}"
-                    + (f"\n{gl}" if gl else ""))
-            return f"skip_fast:{tag_f}"
-        liq_f = metr_f.get("liq") or 0.0
-        mcap_f = metr_f.get("mcap") or 0.0
-        mcap_oc_f = metr_f.get("mcap_onchain") or mcap_f
-        ratio_f = (liq_f / mcap_oc_f) if mcap_oc_f > 0 else (metr_f.get("ratio") or 0.0)
-        age_f = metr_f.get("pool_age") or 0.0
-        tp1_f = float(db.get("goldilocks_tp1", float) or 0.35)
-        tp2_f = float(db.get("goldilocks_tp2", float) or 0.80)
-        decision = {
-            "action": "BUY",
-            "conviction": 90,
-            "size_mult": 1.0,
-            "tp1_x": tp1_f,
-            "tp2_x": tp2_f,
-            "sl_x": -0.30,
-            # alias kompatibilitas pipa eksekusi lama (blok dry-run/live
-            # membaca key tp1/tp2/sl)
-            "tp1": tp1_f, "tp2": tp2_f, "sl": -0.30,
-            "risks": "",
-            "reason": (f"⚡ FAST-PATH Goldilocks: umur {age_f:.0f}s, "
-                       f"liq ${liq_f:,.0f}, mcap ${mcap_oc_f:,.0f}, "
-                       f"ratio {ratio_f * 100:.1f}%, quote OK"),
-            # plumbing metrik gate → notif BUY (2 baris di bawah)
-            "_gate_metrics": dict(metr_f or {}),
-        }
-        db.log_decision(ca=ca, symbol=sym, role="fastpath", action="BUY",
-                        conviction=90, size_mult=1.0,
-                        reason=decision["reason"], risks="goldilocks_defensive")
-        await _notify_log(
-            f"⚡ **FAST-PATH BUY {sym}** _via {src['name']}_\n"
-            f"`{ca}`\n📊 mcap ${mcap_oc_f:,.0f} | liq ${liq_f:,.0f} "
-            f"({ratio_f * 100:.1f}%) | umur pool {age_f:.0f}s\n"
-            f"🎯 TP1 +{tp1_f * 100:.0f}% · TP2 +{tp2_f * 100:.0f}% · "
-            f"SL -30% (conviction 90)\n_{decision['reason']}_")
-    # ---------- 👁 MATA: keputusan entry oleh LLM (opsional) ----------
-    elif db.get("agent_on", str) == "1" and config.LLM_API_KEY:
-        decision = None
-        try:
-            decision = await asyncio.to_thread(
-                agent.decide_entry, pair, ca, src, reason,
-                {"id": caller_id, "name": caller_name,
-                 "track_record": db.caller_stats(caller_id)})
-        except Exception as e:
-            print(f"[agent fail, fallback rule-based] {sym}: {e}")
-    if (decision and decision.get("blacklist_caller") and caller_id
-            and db.get("agent_blacklist", str) == "1"):
-        if db.get("agent_dry_run", str) == "1":
+    #
+    # Mode MATA (LLM memutuskan entry) DIHAPUS: 701 keputusan historis 100%
+    # FAST-PATH, nol eksekusi LLM, dan latency 3–8 s = 17–35 block. Veto
+    # entry sekarang dipegang Radar Pons lewat `pons_veto(ca)` di atas.
+    decision = None
+    ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair)
+    if not ok_f:
+        print(f"[fast-skip] {sym}: {tag_f}")
+        if should_notify_fast_skip(tag_f):
+            gl = _fmt_gate_metrics(metr_f)
             await _notify_log(
-                f"🧪 **MODE LATIHAN — Mata MAU mem-blacklist {caller_name or caller_id}**\n"
-                f"_{decision['reason']}_\n(tidak dieksekusi karena masih latihan)")
-        else:
-            db.add_blacklist(caller_id, caller_name, decision["reason"])
-            await _notify_log(
-                f"🚫 **MATA MEM-BLACKLIST caller {caller_name or caller_id}**\n"
-                f"_{decision['reason']}_\ncall dia berikutnya auto-skip. Kelola di panel 🧠 Otak.")
-    if decision and decision["action"] == "SKIP":
-        await _notify_log(_agent_card(pair, ca, src["name"], decision, "SKIP"))
-        return "skip_agent"
-    if decision and decision["action"] == "BUY" and decision["conviction"] < db.get("agent_min_conviction"):
-        await _notify_log(_agent_card(pair, ca, src["name"], decision, "RAGU",
-                                  min_conv=db.get("agent_min_conviction")))
-        return "skip_agent"
+                f"⚡ **FAST-PATH SKIP {sym}** _via {src['name']}_\n"
+                f"`{ca}`\nreason: {tag_f}"
+                + (f"\n{gl}" if gl else ""))
+        return f"skip_fast:{tag_f}"
+    liq_f = metr_f.get("liq") or 0.0
+    mcap_f = metr_f.get("mcap") or 0.0
+    mcap_oc_f = metr_f.get("mcap_onchain") or mcap_f
+    ratio_f = (liq_f / mcap_oc_f) if mcap_oc_f > 0 else (metr_f.get("ratio") or 0.0)
+    age_f = metr_f.get("pool_age") or 0.0
+    tp1_f = float(db.get("goldilocks_tp1", float) or 0.35)
+    tp2_f = float(db.get("goldilocks_tp2", float) or 0.80)
+    decision = {
+        "action": "BUY",
+        "conviction": 90,
+        "size_mult": 1.0,
+        "tp1_x": tp1_f,
+        "tp2_x": tp2_f,
+        "sl_x": -0.30,
+        # alias kompatibilitas pipa eksekusi lama (blok dry-run/live
+        # membaca key tp1/tp2/sl)
+        "tp1": tp1_f, "tp2": tp2_f, "sl": -0.30,
+        "risks": "",
+        "reason": (f"⚡ FAST-PATH Goldilocks: umur {age_f:.0f}s, "
+                   f"liq ${liq_f:,.0f}, mcap ${mcap_oc_f:,.0f}, "
+                   f"ratio {ratio_f * 100:.1f}%, quote OK"),
+        # plumbing metrik gate → notif BUY (2 baris di bawah)
+        "_gate_metrics": dict(metr_f or {}),
+    }
+    db.log_decision(ca=ca, symbol=sym, role="fastpath", action="BUY",
+                    conviction=90, size_mult=1.0,
+                    reason=decision["reason"], risks="goldilocks_defensive")
+    await _notify_log(
+        f"⚡ **FAST-PATH BUY {sym}** _via {src['name']}_\n"
+        f"`{ca}`\n📊 mcap ${mcap_oc_f:,.0f} | liq ${liq_f:,.0f} "
+        f"({ratio_f * 100:.1f}%) | umur pool {age_f:.0f}s\n"
+        f"🎯 TP1 +{tp1_f * 100:.0f}% · TP2 +{tp2_f * 100:.0f}% · "
+        f"SL -30% (conviction 90)\n_{decision['reason']}_")
     # ---------- 📉 STALENESS GATE: harga sudah lari dari harga evaluasi? ----------
-    # MATA butuh waktu berpikir; kalau harga sudah melonjak melewati ambang
-    # drift (setting agent_max_drift, default 50%) sejak snapshot → BUY
-    # dibatalkan (beli di pucuk / mengincar liquidity yang sedang ditarik).
-    # SKIP dari MATA tidak lewat sini (sudah memutuskan tidak buy).
+    # Gate ini juga berlaku untuk fast-path: quote on-chain diambil ratusan
+    # ms setelah snapshot harga, dan pool baru bisa bergerak cepat. Bila harga
+    # sudah melonjak melewati ambang drift (agent_max_drift, default 50%) →
+    # BUY dibatalkan (beli di pucuk / mengincar liquidity yang sedang ditarik).
     if decision and decision["action"] == "BUY":
         initial_price = float(((pair.get("priceUsd") or 0)))
         try:
@@ -838,7 +785,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         # PILIH KOIN INI — jadi buka posisi SIMULASI, agar TP1/TP2/SL/trail
         # engine monitor ikut menguji rencana trading (harga on-chain
         # & saldo wallet KETIDAKTERLIBATAN sama sekali).
-        await _notify_log(_agent_card(pair, ca, src["name"], decision, "LATIHAN"))
+        await _notify_log(_agent_card(pair, ca, src["name"], decision))
         eth_price = dx.eth_usd(pair)
         buy_usd = (db.get("buy_usd") * decision["size_mult"]) if decision else db.get("buy_usd")
         eth_spent = buy_usd / eth_price if eth_price > 0 else 0.0003
@@ -1014,32 +961,17 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         )
         return "dry_run_simulated"
 
-    # ---------- 🧪 PAGAR FALLBACK saat LATIHAN ----------
-    # Mata NYALA tapi tidak menjawab (LLM error/timeout) → decision None.
-    # Tanpa pagar ini, jalur fallback rule-based di bawah mencoba buy
-    # beneran dan dry-run TIDAK menahannya — dry-run hanya menahan
-    # KEPUTUSAN Mata, bukan ketiadaan keputusan. Selama latihan berlaku:
-    # tidak ada keputusan = tidak ada buy. Di mode LIVE pagar ini tidak
-    # berlaku — fallback rule-based memang perilaku yang diinginkan.
-    if (decision is None and db.get("agent_on", str) == "1"
-            and db.get("agent_dry_run", str) == "1"):
-        await _notify_log(
-            f"🧪 **MODE LATIHAN — Mata tidak menjawab untuk {sym}** _via {src['name']}_\n"
-            f"`{ca}`\nLLM error/timeout — jalur fallback rule-based DITAHAN "
-            f"selama mode latihan (tidak ada keputusan = tidak ada buy).")
-        return "dry_run"
-
     # ---------- 🔭 PAGAR KERAS (mekanisme allow_buy=False) ----------
     # Titik ini adalah SATU-SATUNYA jalan menuju trader.buy di bawah. Kalau
-    # allow_buy=False, fungsi berhenti di sini — berlaku juga saat
-    # decision=None (Mata mati/gagal → fallback rule-based). Di v14 jalur ini
-    # mengunci scanner secara permanen; di v16 gabungan scanner lewat dengan
+    # allow_buy=False, fungsi berhenti di sini. Di v14 jalur ini mengunci
+    # scanner secara permanen; di v16 gabungan scanner lewat dengan
     # allow_buy=True dan titik ini hanya tercapai bila ada pemanggil lain
     # yang sengaja meminta pagar ditutup.
     if not allow_buy:
         ai_line = ""
         if decision:
-            ai_line = (f"\n👁 Mata: **{decision['action']}** (conviction {decision['conviction']})"
+            ai_line = (f"\n⚡ Fast-path: **{decision['action']}** "
+                       f"(conviction {decision['conviction']})"
                        f"\n_{decision['reason']}_")
         if _notify or _public_notify:
             await _notify_log(
@@ -1048,26 +980,19 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
                 f"— buy TIDAK dieksekusi (allow_buy=False)")
         return "no_buy_scanner"
 
-    # ---------- 🧪 PAGAR KERAS MODE LATIHAN (menutup lubang fallback) ----
-    # Paper trading di pipa ini hanya menahan KEPUTUSAN (Mata/FAST-PATH
-    # → posisi simulasi). Bila TIDAK ada keputusan sama sekali — kasus
-    # nyatanya: entry_mode='mata' tetapi Mata OFF (agent_on=0) — pagar
-    # fallback di atas tidak berlaku (ia mensyaratkan agent_on=1) dan
-    # kode lama jatuh ke trader.buy LIVE dari sini, gagal di cek saldo
-    # ETH ("saldo ETH kurang") meski mode latihan. Selama agent_dry_run
-    # ON, trader.buy TIDAK BOLEH tercapai dari pipa ini lewat jalur
-    # mana pun: tidak ada keputusan simulasi = tidak ada buy. Mode LIVE
-    # (agent_dry_run=0) tidak disentuh pagar ini.
+    # ---------- 🧪 PAGAR KERAS MODE LATIHAN (jaring pengaman terakhir) ----
+    # Paper trading menahan keputusan FAST-PATH → posisi simulasi. Blok ini
+    # hanya tercapai bila tidak ada keputusan entry sama sekali (mis. gate
+    # melempar exception sebelum decision diisi). Selama agent_dry_run ON,
+    # trader.buy TIDAK BOLEH tercapai lewat jalur mana pun.
     if db.get("agent_dry_run", str) == "1":
         await _notify_log(
             f"🧪 **MODE LATIHAN — buy LIVE ditahan untuk {sym}** _via {src['name']}_\n"
-            f"`{ca}`\nTidak ada keputusan entry (Mata OFF / mode mata tanpa "
-            f"keputusan) — selama mode latihan, buy betulan tidak dieksekusi "
-            f"dan tidak dicek ke saldo ETH. Aktifkan Mata/FAST-PATH untuk "
-            f"posisi simulasi, atau matikan mode latihan untuk live.")
+            f"`{ca}`\nTidak ada keputusan entry yang valid — selama mode latihan "
+            f"buy betulan tidak dieksekusi dan saldo ETH tidak dicek.")
         return "dry_run"
 
-    usd = db.get("buy_usd") * decision["size_mult"] if decision else None
+    usd = db.get("buy_usd") * decision["size_mult"]
     try:
         pos = await asyncio.to_thread(_trader.buy, ca, pair, src["name"], usd)
     except Exception as e:

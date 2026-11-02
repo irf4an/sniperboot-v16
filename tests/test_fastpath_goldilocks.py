@@ -1,12 +1,12 @@
-"""Unit test saklar Mode Entry (MATA LLM vs FAST-PATH Goldilocks).
+"""Unit test FAST-PATH Goldilocks — satu-satunya jalur entry.
 
 Cakupan:
-1) toggle setting 'entry_mode' mata <-> fast (simulasi handler callback).
+1) mode MATA sudah dihapus total (setting + fungsi agent.decide_entry).
 2) goldilocks_eval: umur pool < 30s / > 180s di-skip, 60s lolos.
 3) rasio liq/mcap < 0.35 di-skip, >= 0.35 lolos.
 4) safety dev > 3% di-skip (via _fastpath_gate).
 5) slippage quoter > 15% di-skip (via _fastpath_gate).
-6) mode='mata': fast-path tidak aktif — agent.decide_entry tetap dipanggil.
+6) pipa ASLI: entry hanya lewat fast-path, posisi simulasi terbuka.
 7) default settings Goldilocks masuk DB.
 
 Jalankan: python3 tests/test_fastpath_goldilocks.py
@@ -26,7 +26,7 @@ _tmpdb.close()
 os.environ["DB_PATH"] = _tmpdb.name
 
 from sniper import config, db          # noqa: E402
-from sniper import listener, dexscreener as dx  # noqa: E402
+from sniper import listener, agent, dexscreener as dx  # noqa: E402
 from sniper.listener import goldilocks_eval, _fastpath_gate  # noqa: E402
 
 PASS, FAIL = [], []
@@ -101,20 +101,17 @@ class Dec18ERC20:
 
 
 # =====================================================================
-print("\n[1] toggle setting entry_mode (simulasi handler callback)")
-db.set_("entry_mode", "fast")
-check("toggle: mata -> fast", db.get("entry_mode", str) == "fast",
-      db.get("entry_mode", str))
-db.set_("entry_mode", "mata")
-check("toggle: fast -> mata", db.get("entry_mode", str) == "mata",
-      db.get("entry_mode", str))
-check("default entry_mode = mata",
-      config.SETTING_DEFAULTS.get("entry_mode") == "mata")
+print("\n[1] jalur entry tunggal: FAST-PATH (mode MATA sudah dihapus)")
+check("setting entry_mode sudah tidak ada",
+      "entry_mode" not in config.SETTING_DEFAULTS)
+check("setting agent_on sudah tidak ada",
+      "agent_on" not in config.SETTING_DEFAULTS)
+check("agent.decide_entry sudah tidak ada",
+      not hasattr(agent, "decide_entry"))
 
 
 # =====================================================================
 print("\n[2] umur pool Goldilocks (min 10s, maks 300s / 5m)")
-db.set_("entry_mode", "fast")
 ok, tag, m = goldilocks_eval(pair(age_s=5))
 check("umur 5s (< 10s) → skip", not ok and tag.startswith("age_")
       and abs(m["pool_age"] - 5.0) < 3.0, f"tag={tag}")
@@ -416,60 +413,29 @@ check("mcap on-chain $200.000 (> 45k) → skip mcap_onchain_pucuk",
 
 
 # =====================================================================
-print("\n[6] mode='mata' → fast-path TIDAK aktif, agent tetap dipanggil")
-_agent_calls = []
+print("\n[6] pipa ASLI: entry hanya lewat fast-path (0 detik LLM)")
 _fast_notifs = []
-
-
-def fake_agent_buy(*a, **k):
-    _agent_calls.append(1)
-    return {"action": "BUY", "conviction": 90, "size_mult": 1.0,
-            "tp1": 0.5, "tp2": 1.0, "sl": -0.3,
-            "reason": "mata menjawab", "risks": ""}
-
-
-_orig_best = listener.dx.best_pair
-_orig_agent = listener.agent.decide_entry
-_orig_notify = listener._notify
-
-db.set_("entry_mode", "mata")
-db.set_("agent_on", "1")
-db.set_("agent_dry_run", "1")
-
-listener.dx.best_pair = lambda ca: p_ok
-listener.safety.check = lambda tr, ca, p: (True, "ok")
-listener.agent.decide_entry = fake_agent_buy
-listener._trader = QuoterOk()
-listener._notify = fake_notify
 
 
 async def fake_notify_fast(text, buttons=None, **kw):
     _fast_notifs.append(text)
     return text
 
+
+listener.dx.best_pair = lambda ca: p_ok
+listener.safety.check = lambda tr, ca, p: (True, "ok")
+listener._trader = QuoterOk()
+listener._notify = fake_notify_fast
+db.set_("agent_dry_run", "1")
+
 npos = len(db.open_positions())
 st = asyncio.run(listener.process_ca(CA, SRC, None, "UNITTEST", allow_buy=True))
-check("mode mata: agent.decide_entry TERPANGGIL", len(_agent_calls) == 1,
-      f"calls={len(_agent_calls)}")
-check("mode mata: bukan skip_fast / posisi terbuka (dry_run_simulated)",
+check("pipa ASLI: lolos gate → posisi simulasi terbuka",
       st == "dry_run_simulated" and len(db.open_positions()) == npos + 1, st)
-check("mode mata: TIDAK ada notif FAST-PATH",
-      all("FAST-PATH" not in t for t in _notifications),
-      str(_notifications[-1])[:120])
-
-# sebaliknya mode fast: agent TIDAK dipanggil (0 detik LLM)
-listener.agent.decide_entry = fake_agent_buy   # tetap terpasang spy
-listener._notify = fake_notify_fast
-_calls_before = len(_agent_calls)
-db.set_("entry_mode", "fast")
-st = asyncio.run(listener.process_ca(
-    "0x" + "bb" * 20, dict(SRC, id=2), None, "UNITTEST", allow_buy=True))
-check("mode fast: agent.decide_entry TIDAK dipanggil (0 detik LLM)",
-      len(_agent_calls) == _calls_before and st.startswith(("dry_run", "bought")),
-      f"calls {_calls_before}->{len(_agent_calls)}, st={st}")
-check("mode fast: notif FAST-PATH BUY terkirim",
-      any("FAST-PATH BUY" in t for t in _fast_notifs), st)
-
+check("pipa ASLI: notif FAST-PATH BUY terkirim",
+      any("FAST-PATH BUY" in t for t in _fast_notifs), str(_fast_notifs[-1:])[:160])
+check("pipa ASLI: tidak ada modul LLM entry yang dipanggil",
+      not hasattr(listener, "agent") or not hasattr(listener.agent, "decide_entry"))
 
 # =====================================================================
 print("\n[7] default settings Goldilocks masuk DB")

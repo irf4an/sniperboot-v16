@@ -17,43 +17,7 @@ from . import config, db, dexscreener as dx
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_DEFAULT_BASE = "https://api.openai.com/v1"
 
-# ---- pagar keras: LLM tidak bisa keluar dari rentang ini ----
-SIZE_MULT_MIN = 0.25
-TP1_RANGE = (0.20, 3.0)
-TP2_RANGE = (0.30, 10.0)
-SL_RANGE = (-0.60, -0.10)
-
-SCREENER_SYSTEM = """You are the entry-decision module of hoodsniper, a meme token sniper on Robinhood Chain.
-The "caller" field holds the track record of the specific person who posted this call (calls_bought, hit_tp1, full_tp, stopped) \u2014 a caller with many stopped and few TP is a strong reason to size down or SKIP; a proven caller justifies more conviction. A token call has ALREADY passed hard filters (mcap limit, min liquidity, dev-holding and holder-concentration checks). Your job is judgment on top of that, using the framework below.
-
-Respond with ONLY a JSON object, no prose, no markdown fences:
-{"action":"BUY"|"SKIP","conviction":0-100,"size_mult":0.25-MAXMULT,"tp1":0.2-3.0,"tp2":0.3-10.0,"sl":-0.6--0.1,"reason":"2-3 short clauses separated by '; ', <=240 chars, bahasa Indonesia","risks":"<=140 chars, specific to this token","blacklist_caller":false}
-
-EVALUATION FRAMEWORK \u2014 judge in this order, every time:
-1) AGE & STRUCTURE: pool_age_minutes <5 = embryonic (sniper/dev playground; demand overwhelming evidence), 5-30 = early, >30 = starts to have a track record. A brand-new pool that is already falling is distribution, not a dip.
-2) LIQUIDITY QUALITY: weigh liquidity_usd absolute AND against mcap. liq/mcap <10% = fragile (the price is fiction), 10-30% = normal for memes, >30% = sturdy. A big mcap standing on thin liquidity is a trap, not strength.
-3) MOMENTUM: price_change_pct m5 is entry timing, h1 is the trend. A vertical move (m5 >= +100%) means you are late: chasing is acceptable only at cut size with a fast TP1, and m5 >= +150% defaults to SKIP. Negative m5 on a minutes-old pool = early holders exiting.
-4) FLOW PRESSURE: compare buys vs sells (txns_m5, txns_h1) but weigh VALUE, not just count \u2014 many small buys against a few sells while price falls means large sellers are distributing (bearish). One-sided buy flow with rising price = accumulation.
-5) SAFETY RESIDUE: hard filters passed, but holder data minutes after launch may be unverified; price unverified data into size_mult instead of pretending it is clean, and treat verified-bad concentration as a SKIP.
-6) SOURCE & CALLER: apply the source/caller track record and the lessons in memory. A proven source can rescue a borderline setup; an unproven one cannot.
-
-CONVICTION CALIBRATION (be stingy \u2014 the admin grades your conviction against real outcomes):
-- 85-100: exceptional only \u2014 sturdy liquidity, one-sided flow, sane momentum, proven source. Rare.
-- 70-84: strong setup with one visible flaw.
-- 55-69: decent but flawed; BUY only at reduced size.
-- 35-54: marginal \u2014 default SKIP.
-- 0-34: clear reject.
-
-OUTPUT DISCIPLINE:
-- reason: 2-3 clauses separated by '; ' \u2014 each clause = one factor + its ACTUAL numbers + the implication. No number, no claim. Generic filler ("potensi bagus", "cukup menarik") is forbidden.
-- risks: name the single most likely way THIS specific trade loses money, with its number when there is one.
-- size_mult: 1.0 = normal. <1 is MANDATORY when any of these hold: age <5 min, liq/mcap <15%, m5 >= +100%, holder data unverified. >1 only for 85+ conviction setups.
-- tp1/tp2 are profit fractions (0.5 = +50%), sl is loss fraction (-0.3 = -30%). Defaults tp1=0.5, tp2=1.0, sl=-0.3. Vertical entries take profit faster (lower tp1); sturdy setups may aim further.
-
-Set "blacklist_caller": true ONLY when this caller's track record is clearly toxic (>=4 bought calls with >=75% stopped/rugged and zero full TPs). A blacklisted caller's future calls are auto-skipped without asking you \u2014 this is real authority, use it carefully.
-
-You cannot exceed the caps; out-of-range values will be clamped anyway."""
-
+# ---- pagar keras: rentang parameter yang diizinkan LLM manajer ----
 MANAGER_SYSTEM = """You are the position-management module of hoodsniper. Deterministic TP/SL rules already run every cycle as a backstop; you add judgment between those thresholds (e.g. momentum died at +20%, exit early; or strong trend at +40%, hold for TP).
 
 Respond with ONLY a JSON object:
@@ -291,92 +255,6 @@ def _pair_context(pair):
     }
 
 
-def _pair_entry_price(pair):
-    try:
-        return float((pair or {}).get("priceUsd") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _memory_context():
-    lessons = db.recent_lessons(5)
-    decisions = db.recent_decisions(5)
-    return {
-        "lessons": [l["text"] for l in lessons],
-        "recent_decisions": [
-            {"symbol": d["symbol"], "action": d["action"], "conviction": d["conviction"],
-             "reason": d["reason"], "outcome": d.get("outcome")}
-            for d in decisions
-        ],
-    }
-
-
-# ---------- entry decision (screener role) ----------
-def decide_entry(pair, ca, source, safety_note, caller=None):
-    base_usd = db.get("buy_usd")
-    max_mult = db.get("agent_size_mult_max")
-    insurance_note_sanitized = sanitize_text(safety_note, 120)
-    caller_sanitized = None
-    if caller:
-        caller_sanitized = {
-            "id": caller.get("id"),
-            "name": sanitize_text(caller.get("name"), 80),
-            "track_record": caller.get("track_record"),
-        }
-    ctx = {
-        "token": _pair_context(pair),
-        "safety_check": insurance_note_sanitized,
-        "source": {"name": sanitize_text(source["name"], 80), "mcap_limit": source["mcap_max"],
-                   "track_record": db.source_stats(source["name"])},
-        "caller": caller_sanitized,
-        "initial_price_usd": _pair_entry_price(pair),
-        "base_buy_usd": base_usd,
-        "defaults": {"tp1": db.get("tp1"), "tp2": db.get("tp2"), "sl": db.get("sl")},
-        "memory": _memory_context(),
-    }
-    # Panggilan LLM dicoba MAKSIMAL 2x: kegagalan sesaat (timeout/putus
-    # gateway/JSON rusak) tidak boleh langsung menjatuhkan keputusan ke
-    # jalur fallback — di lapangan (2026-10-22) gateway publik beberapa
-    # kali gagal menjawab dan tiap kegagalan mengorbankan satu sampel
-    # keputusan. Gagal dua-duanya → exception naik ke pemanggil seperti
-    # sebelumnya (listener memperlakukannya sebagai "Mata tidak menjawab").
-    d = None
-    last_err = None
-    for attempt in (1, 2):
-        try:
-            raw = _call(SCREENER_SYSTEM.replace("MAXMULT", str(max_mult)),
-                        json.dumps(ctx), 1200)
-            d = _parse_json(raw)
-            break
-        except Exception as e:
-            last_err = e
-            if attempt == 1:
-                print(f"[agent] decide_entry percobaan 1 gagal ({e}) — "
-                      f"mengulang sekali dalam 3 detik")
-                time.sleep(3)
-    if d is None:
-        raise last_err
-
-    action = "BUY" if str(d.get("action", "")).upper() == "BUY" else "SKIP"
-    # ---------- sanitasi pagar keras: teks bebas LLM dipangkas & dibersihkan ----------
-    decision = {
-        "action": action,
-        "conviction": int(_clamp(d.get("conviction"), 0, 100, 50)),
-        "size_mult": _clamp(d.get("size_mult"), SIZE_MULT_MIN, max_mult, 1.0),
-        "tp1": _clamp(d.get("tp1"), *TP1_RANGE, db.get("tp1")),
-        "tp2": _clamp(d.get("tp2"), *TP2_RANGE, db.get("tp2")),
-        "sl": _clamp(d.get("sl"), *SL_RANGE, db.get("sl")),
-        "reason": sanitize_text(d.get("reason"), 250),
-        "risks": sanitize_text(d.get("risks"), 150),
-        "blacklist_caller": bool(d.get("blacklist_caller")),
-    }
-    if decision["tp2"] <= decision["tp1"]:
-        decision["tp2"] = decision["tp1"] + 0.25
-    db.log_decision(ca=ca, symbol=ctx["token"]["symbol"] or "?", role="screener",
-                    action=decision["action"], conviction=decision["conviction"],
-                    size_mult=decision["size_mult"], reason=decision["reason"],
-                    risks=decision["risks"])
-    return decision
 
 
 # ---------- position review (manager role) ----------
