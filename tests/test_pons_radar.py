@@ -270,5 +270,93 @@ class TestProcessCandidates(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM calls").fetchone()[0], 0)
 
 
+class TestVetoBridge(unittest.TestCase):
+    """Jembatan Radar Pons → jalur beli: hanya penilaian yang mem-blacklist."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        self.tmp.close()
+        self.old_db_path = config.DB_PATH
+        config.DB_PATH = self.db_path
+        db.init()
+        db.set_("pons_alert_min_score", "60")
+        db.set_("pons_alert_max_per_hour", "2")
+        db.set_("pons_llm_on", "0")
+        db.set_("pons_enrich_concurrency", "2")
+
+    def tearDown(self):
+        config.DB_PATH = self.old_db_path
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+
+    def _seed(self, n, ts_offset=30):
+        now = int(time.time())
+        for i in range(n):
+            ca = "0x" + f"{i + 1:02x}" * 20
+            db.add_pons_token(ca, deployer="0x" + f"{i + 50:02x}" * 20,
+                              launch_ts=now - ts_offset)
+        return db.get_pons_pending()
+
+    def test_block_buy_flag_semantics(self):
+        ca_ok = "0x" + "aa" * 20
+        ca_no = "0x" + "bb" * 20
+        db.add_pons_token(ca_ok, launch_ts=int(time.time()))
+        db.add_pons_token(ca_no, launch_ts=int(time.time()))
+        db.reject_pons(ca_ok, "LLM BUANG: sindikat", block_buy=True)
+        db.reject_pons(ca_no, "cap alert per jam penuh", block_buy=False)
+        self.assertEqual(db.get_pons_blocked_cas(), {ca_ok})
+
+    def test_low_score_blocks_but_cap_does_not(self):
+        """Skor rendah = penilaian → diblokir. Cap per jam = operasional → tidak."""
+        pending = self._seed(1)
+        fake = {pending[0]["ca"]: {"symbol": "sbdxcnm", "name": "ascasd",
+                                   "total_supply": 1e9}}
+        with mock.patch.object(pons_radar, "_enrich_many", return_value=fake), \
+             mock.patch.object(pons_radar, "llm_verdict", return_value=None):
+            alerts = pons_radar.process_candidates(pending)
+        self.assertEqual(alerts, [])
+        self.assertIn(pending[0]["ca"], db.get_pons_blocked_cas())
+
+        with db._conn() as c:
+            c.execute("DELETE FROM pons_queue")
+        db.set_("pons_alert_max_per_hour", "1")
+        pending = self._seed(2, ts_offset=20)
+        fake = {r["ca"]: {"symbol": "PONKE", "name": f"Ponke {i}",
+                          "total_supply": 1e9}
+                for i, r in enumerate(pending)}
+        with mock.patch.object(pons_radar, "_enrich_many", return_value=fake), \
+             mock.patch.object(pons_radar, "llm_verdict", return_value=None):
+            alerts = pons_radar.process_candidates(pending)
+        self.assertEqual(len(alerts), 1)
+        blocked = db.get_pons_blocked_cas()
+        self.assertEqual(blocked, set(), f"cap tidak boleh mem-blacklist: {blocked}")
+
+    def test_is_blacklisted_memory_and_refresh(self):
+        ca = "0x" + "cc" * 20
+        db.add_pons_token(ca, launch_ts=int(time.time()))
+        db.reject_pons(ca, "skor rendah", block_buy=True)
+        pons_radar._blacklist = set()
+        pons_radar._blacklist_ts = 0.0
+        pons_radar.refresh_blacklist(force=True)
+        self.assertTrue(pons_radar.is_blacklisted(ca))
+        self.assertTrue(pons_radar.is_blacklisted(ca.upper()))
+        self.assertFalse(pons_radar.is_blacklisted("0x" + "dd" * 20))
+
+    def test_listener_pons_veto_and_fail_open(self):
+        from sniper import listener
+        ca = "0x" + "ee" * 20
+        pons_radar._blacklist = {ca}
+        pons_radar._blacklist_ts = time.time()
+        self.assertTrue(listener.pons_veto(ca))
+        self.assertTrue(listener.pons_veto(ca.upper()))
+        self.assertFalse(listener.pons_veto("0x" + "ff" * 20))
+
+        pons_radar._blacklist_ts = 0.0
+        with mock.patch.object(pons_radar, "refresh_blacklist",
+                               side_effect=RuntimeError("db mati")):
+            self.assertFalse(listener.pons_veto(ca))  # fail-open
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

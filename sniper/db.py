@@ -120,8 +120,13 @@ def init():
             reason TEXT,
             llm_model TEXT,
             checked_at INTEGER,
-            alerted_at INTEGER)""")
+            alerted_at INTEGER,
+            block_buy INTEGER DEFAULT 0)""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_status ON pons_queue(status)")
+        # Migrasi aditif: DB yang dibuat sebelum kolom `block_buy` ada.
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(pons_queue)")}
+        if "block_buy" not in cols:
+            c.execute("ALTER TABLE pons_queue ADD COLUMN block_buy INTEGER DEFAULT 0")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_launch_ts ON pons_queue(launch_ts)")
         for k, v in config.SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
@@ -1018,7 +1023,8 @@ def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) 
 # sengaja TERPISAH dari calls/positions supaya token pre-graduasi mustahil
 # ikut masuk pipa listener.process_ca / trader.buy.
 _PONS_UPDATABLE = {"symbol", "name", "total_supply", "status", "score",
-                   "verdict", "reason", "llm_model", "checked_at", "alerted_at"}
+                   "verdict", "reason", "llm_model", "checked_at", "alerted_at",
+                   "block_buy"}
 
 
 def add_pons_token(ca, deployer=None, curve=None, launch_block=0, launch_ts=0) -> bool:
@@ -1062,11 +1068,29 @@ def get_pons_pending(limit=50) -> list:
 
 
 def reject_pons(ca, reason, status="rejected", score=0, verdict="BUANG",
-                llm_model=None):
-    """Tandai kandidat ditolak (heuristik maupun LLM) + simpan alasannya."""
+                llm_model=None, block_buy=False):
+    """Tandai kandidat ditolak (heuristik maupun LLM) + simpan alasannya.
+
+    `block_buy=True` HANYA untuk penolakan yang bersifat penilaian (LLM
+    BUANG, skor di bawah ambang). Penolakan operasional — cap alert per jam
+    penuh, RPC gagal — TIDAK boleh mem-blacklist koin, karena bukan berarti
+    koinnya jelek.
+    """
     update_pons_token(ca, status=status, reason=(reason or "")[:400],
                       score=int(score or 0), verdict=verdict,
-                      llm_model=llm_model, checked_at=int(time.time()))
+                      llm_model=llm_model, checked_at=int(time.time()),
+                      block_buy=1 if block_buy else 0)
+
+
+def get_pons_blocked_cas() -> set:
+    """Set CA yang diveto Radar Pons (dibaca listener sebagai blacklist 0 ms).
+
+    Hanya baris `block_buy=1`. Dipanggil tiap 30 detik oleh loop refresh,
+    BUKAN per kandidat — jalur beli cukup memeriksa set di memori.
+    """
+    with _lock, _conn() as c:
+        return {str(r["ca"]).lower() for r in
+                c.execute("SELECT ca FROM pons_queue WHERE block_buy=1")}
 
 
 def mark_pons_alerted(ca, symbol=None, name=None, score=0, verdict="AMAN",

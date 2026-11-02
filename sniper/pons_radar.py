@@ -47,6 +47,14 @@ _w3_lock = threading.Lock()
 _notify_cb = None
 _public_notify_cb = None
 
+# ==================== veto jalur beli (0 ms) ====================
+# Listener memanggil `is_blacklisted(ca)` di awal fast-path. Set ini
+# diperbarui `blacklist_loop` tiap 30 detik, jadi jalur beli TIDAK melakukan
+# query DB per kandidat — cukup satu cek keanggotaan set di memori.
+_blacklist = set()
+_blacklist_ts = 0.0
+BLACKLIST_REFRESH_SEC = 30
+
 
 # ==================== plumbing notifikasi ====================
 def bind_notify(notify, public_notify=None):
@@ -57,6 +65,33 @@ def bind_notify(notify, public_notify=None):
         _notify_cb = notify
     if public_notify is not None:
         _public_notify_cb = public_notify
+
+
+# ==================== veto jalur beli ====================
+def refresh_blacklist(force=False) -> int:
+    """Muat ulang set veto dari DB. Return jumlah CA yang diblokir."""
+    global _blacklist, _blacklist_ts
+    now = time.time()
+    if not force and _blacklist_ts and now - _blacklist_ts < BLACKLIST_REFRESH_SEC:
+        return len(_blacklist)
+    try:
+        _blacklist = db.get_pons_blocked_cas()
+        _blacklist_ts = now
+    except Exception as e:
+        print(f"[pons-radar] refresh blacklist gagal (pakai set lama): {e}")
+    return len(_blacklist)
+
+
+def is_blacklisted(ca) -> bool:
+    """O(1). True = koin diveto Radar Pons saat masih di bonding curve.
+
+    Dipanggil listener di awal fast-path SEBELUM gate matematika. Panggilan
+    pertama per proses bisa memicu satu query DB (~1 ms) bila loop refresh
+    belum sempat jalan; setelah itu murni lookup set.
+    """
+    if not _blacklist_ts:
+        refresh_blacklist()
+    return str(ca or "").strip().lower() in _blacklist
 
 
 async def _send_alert(text, buttons=None):
@@ -526,7 +561,7 @@ def process_candidates(batch) -> list:
             if llm["verdict"] == "BUANG":
                 db.reject_pons(ca, f"LLM BUANG: {llm['reason'] or '-'}",
                                score=final, verdict="BUANG",
-                               llm_model=llm["model"])
+                               llm_model=llm["model"], block_buy=True)
                 continue
         else:
             work.update({"score": heur, "verdict": "WASPADA",
@@ -535,7 +570,8 @@ def process_candidates(batch) -> list:
 
         if work["score"] < min_score:
             db.reject_pons(ca, f"skor {work['score']} < {min_score}",
-                           score=work["score"], verdict=work["verdict"])
+                           score=work["score"], verdict=work["verdict"],
+                           block_buy=True)
             continue
         if cap_left is not None and cap_left <= 0:
             db.reject_pons(ca, "cap alert per jam penuh", score=work["score"],
@@ -554,6 +590,26 @@ def process_candidates(batch) -> list:
 
 
 # ==================== loop ====================
+async def blacklist_loop():
+    """Warm-up + refresh set veto tiap 30 s.
+
+    Jalan TANPA peduli `pons_radar_on`: kalau radar dimatikan, veto yang
+    sudah ada tetap berlaku di jalur beli.
+    """
+    await asyncio.sleep(5)
+    while True:
+        try:
+            n = await asyncio.to_thread(refresh_blacklist, True)
+            if n:
+                print(f"[pons-radar] veto aktif: {n} CA diblokir")
+            await asyncio.sleep(BLACKLIST_REFRESH_SEC)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[pons-radar] blacklist loop error (lanjut): {e}")
+            await asyncio.sleep(BLACKLIST_REFRESH_SEC)
+
+
 async def radar_loop():
     """Loop radar. Default MATI (`pons_radar_on=0`) — nyalakan dari settings."""
     print("[pons-radar] loop siap — alert-only, TIDAK masuk pipa beli")

@@ -4,13 +4,28 @@ import re
 import time
 import traceback
 from telethon import events, Button
-from . import config, db, safety, agent, dexscreener as dx
+from . import config, db, safety, agent, dexscreener as dx, pons_radar
 
 CA_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 _trader = None
 _notify = None
 _public_notify = None  # async fn(text, buttons=None) → channel log PUBLIK (opsional)
+
+
+def pons_veto(ca) -> bool:
+    """True bila CA diveto Radar Pons saat masih di bonding curve.
+
+    Dipisah jadi fungsi kecil supaya bisa diuji langsung: satu-satunya
+    ketergantungannya adalah set di memori `pons_radar.is_blacklisted`
+    (O(1), tanpa query DB di jalur beli).
+    """
+    try:
+        return pons_radar.is_blacklisted(ca)
+    except Exception as e:
+        # Fail-open: radar rusak TIDAK boleh menghentikan bot membeli.
+        print(f"[pons-veto] cek veto error (dianggap lolos): {e}")
+        return False
 
 
 # ---------- LOG PUBLIK (mode publik) ----------
@@ -699,6 +714,20 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         print(f"[safety-skip] {sym}: {reason}")
         await _notify_log(f"🛡 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{reason}")
         return "filtered:safety"
+
+    # ---------- 🚫 VETO RADAR PONS (0 ms, pra-graduasi) ----------
+    # Radar menilai koin saat masih di bonding curve. Koin yang ditolak
+    # (LLM BUANG / skor di bawah ambang) masuk set veto di memori. Dicek
+    # SEBELUM gate matematika: kalau koinnya sudah dinilai buruk, tidak
+    # perlu hitung liq/mcap/quote sama sekali.
+    if pons_veto(ca):
+        print(f"[pons-veto] {sym}: ditolak Radar Pons saat pra-graduasi")
+        await _notify_log(
+            f"🚫 **VETO RADAR PONS {sym}** _via {src['name']}_\n"
+            f"`{ca}`\n"
+            f"_alasan: ditolak LLM/skor saat masih di bonding curve_\n"
+            f"_(fast-path tidak dijalankan)_")
+        return "skip_pons_veto"
 
     # ---------- ⚡ FAST-PATH GOLDILOCKS (entry_mode='fast', 0 detik LLM) ----
     # Evaluasi murni matematika/bytecode: umur pool → liq/mcap → safety →

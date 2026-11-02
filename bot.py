@@ -194,6 +194,7 @@ async def main():
     # masuk pipa beli. Real-time ke DM admin; digest publik per jam (opsi C)
     # hanya bila pons_radar_public=1.
     pons_radar.bind_notify(notify, public_notify=public_notify)
+    asyncio.create_task(pons_radar.blacklist_loop())
     asyncio.create_task(pons_radar.radar_loop())
     asyncio.create_task(pons_radar.digest_loop())
 
