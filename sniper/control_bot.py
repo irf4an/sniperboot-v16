@@ -431,7 +431,6 @@ def stats_panel():
 
 
 def agent_panel():
-    manage = db.get("agent_manage_on", str) == "1"
     dry = db.get("agent_dry_run", str) == "1"
     key_ok = bool(config.LLM_API_KEY)
     n_lessons = len(db.recent_lessons(100))
@@ -439,9 +438,9 @@ def agent_panel():
         "🧠 **OTAK — lapisan LLM hoodsniper**\n",
         "⚡ entry: **FAST-PATH (Math)** — 0 detik LLM, satu-satunya jalur entry",
         "📡 veto pra-graduasi: **Radar Pons** (LLM kurasi, alert-only)",
+        "🚪 exit: **100% Deterministik on-chain** (TP/SL/Rug/Time-Stop)",
         f"provider: **{config.LLM_PROTOCOL}**" + (f" · `{config.LLM_BASE_URL}`" if config.LLM_BASE_URL else ""),
         f"API key: {'✅ terpasang' if key_ok else '❌ belum ada LLM_API_KEY di .env'}",
-        f"✋ Tangan (review posisi): **{'ON' if manage else 'OFF'}** (tiap {db.get('agent_review_min'):.0f} mnt)",
         f"mode: **{'🧪 MODE LATIHAN' if dry else '🔴 LIVE'}**",
         f"model: `{db.get('agent_model', str)}`",
         f"💡 insting tersimpan: **{n_lessons}**\n",
@@ -450,7 +449,6 @@ def agent_panel():
         oc = f" → {d['outcome']}" if d.get("outcome") else ""
         lines.append(f"• [{d['role']}] **{d['action']} {d['symbol']}** ({d['conviction']}){oc}\n  _{d['reason'][:80]}_")
     buttons = [
-        [Button.inline(f"{'🔴 Off' if manage else '🟢 On'} Tangan", b"agt:manage")],
         [Button.inline(f"{'🔴 Live-kan' if dry else '🧪 Mode Latihan'}", b"agt:dry"),
          Button.inline("🤖 Ganti model", b"agt:model")],
         [Button.inline("👣 Jejak", b"agt:log"),
@@ -682,7 +680,7 @@ async def _route(event, data):
         t, b = agent_panel()
         await event.edit(t, buttons=b)
     elif data == "agt:manage":
-        db.set_("agent_manage_on", "0" if db.get("agent_manage_on", str) == "1" else "1")
+        await event.answer("Tangan dinonaktifkan permanen — exit 100% on-chain.", alert=True)
         t, b = agent_panel(); await event.edit(t, buttons=b)
     elif data == "agt:dry":
         db.set_("agent_dry_run", "0" if db.get("agent_dry_run", str) == "1" else "1")

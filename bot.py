@@ -185,7 +185,7 @@ async def main():
     listener.register(user, trader, notify, public_notify=public_notify)
     control_bot.register(bot, trader, user)
     asyncio.create_task(engine.monitor_loop())
-    asyncio.create_task(engine.agent_review_loop())
+    # engine.agent_review_loop dinonaktifkan (Tangan dipensiunkan; exit 100% deterministik on-chain)
     asyncio.create_task(engine.daily_recap_loop())
     asyncio.create_task(scanner.scanner_loop())  # v16: scanner = sumber sinyal kedua (gabungan)
     asyncio.create_task(tracker.tracker_loop())  # v16.1: tracker insider copy-trade (sumber sinyal ketiga)
