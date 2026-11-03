@@ -703,9 +703,12 @@ async def _route(event, data):
     elif data == "agt:lessons":
         await event.answer("melatih insting & evaluasi parameter…")
         try:
+            n_closed = len(db.closed_positions_with_decisions(5))
+            if n_closed < 5:
+                return await event.respond(f"Belum cukup data — butuh ≥5 posisi closed (saat ini {n_closed}).")
             lessons, proposals = await __import__("asyncio").to_thread(agent.derive_lessons)
             if not lessons and not proposals:
-                return await event.respond("Belum cukup pengalaman — butuh ≥5 posisi closed buat melatih insting.")
+                return await event.respond("⚠️ Evaluasi LLM belum menghasilkan poin baru. Coba sesaat lagi.")
 
             lines = []
             if lessons:

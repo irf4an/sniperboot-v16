@@ -335,11 +335,24 @@ def derive_lessons():
     if len(closed) < 5:
         return [], []
     current_settings = {k: db.get(k) for k in TUNABLE_BOUNDS}
+    compact = []
+    for r in closed:
+        pnl = 0.0
+        if r.get("eth_spent") and r["eth_spent"] > 0:
+            pnl = round(((r.get("realized_eth", 0) - r["eth_spent"]) / r["eth_spent"]) * 100, 1)
+        compact.append({
+            "symbol": r["symbol"],
+            "status": r["status"],
+            "pnl": f"{pnl:+}%",
+            "tp1": bool(r.get("tp1_done")),
+            "entry": r.get("entry_reason") or ""
+        })
     payload = json.dumps({
         "current_parameters": current_settings,
-        "recent_closed_trades": closed
+        "recent_closed_trades": compact
     })
-    raw = _call(AUTO_TUNE_SYSTEM, payload, 1500)
+    # ponytail: max_tokens 4000 untuk menampung reasoning DeepSeek + JSON akhir
+    raw = _call(AUTO_TUNE_SYSTEM, payload, 4000)
     lessons = []
     raw_lessons = []
     raw_proposals = []
