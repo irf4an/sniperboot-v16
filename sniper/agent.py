@@ -27,6 +27,42 @@ Be conservative: SELL actions execute real trades. Only sell when the data clear
 
 LESSONS_SYSTEM = """You analyze closed trades of a meme token sniper and extract at most 3 short, concrete, actionable lessons (bahasa Indonesia). Respond ONLY with a valid JSON array of strings, e.g. ["pelajaran 1", "pelajaran 2"]. Do not output thinking or prose."""
 
+# ponytail: tuning terbatas 7 parameter terpenting; upgrade path: ekspansi ke ambang volume/txns bila pola liquidity berubah
+TUNABLE_BOUNDS = {
+    "goldilocks_min_age_sec": {"min": 10.0, "max": 120.0, "type": int, "label": "Min Umur Pool (s)"},
+    "goldilocks_max_mcap": {"min": 20000.0, "max": 50000.0, "type": float, "label": "Max Mcap ($)"},
+    "goldilocks_min_liq_mcap_ratio": {"min": 0.25, "max": 0.60, "type": float, "label": "Min Rasio Liq/Mcap"},
+    "goldilocks_tp1": {"min": 0.20, "max": 0.50, "type": float, "label": "Target TP1 (+%)"},
+    "goldilocks_tp2": {"min": 0.50, "max": 1.50, "type": float, "label": "Target TP2 (+%)"},
+    "agent_max_drift": {"min": 0.20, "max": 0.60, "type": float, "label": "Max Drift Harga (%)"},
+    "trail_pct": {"min": 0.15, "max": 0.35, "type": float, "label": "Trailing Stop (%)"},
+}
+
+AUTO_TUNE_SYSTEM = """You are Adaptive Auto-Tuner for a Uniswap v4 meme token sniper bot on Robinhood Chain.
+Analyze closed trades and current parameter settings.
+Respond ONLY with a valid JSON object matching this schema:
+{
+  "lessons": ["short observation 1 in Indonesian", "short observation 2"],
+  "proposals": [
+    {
+      "param": "<param_name>",
+      "val": <numeric_value>,
+      "reason": "<short Indonesian explanation citing data>"
+    }
+  ]
+}
+
+Allowed params in proposals:
+- goldilocks_min_age_sec: pool min age in seconds (range: 10 to 120). Raise if pools rug in <20s.
+- goldilocks_max_mcap: max mcap on-chain at entry in USD (range: 20000 to 50000). Lower if high mcap entries fail.
+- goldilocks_min_liq_mcap_ratio: min liq/mcap ratio (range: 0.25 to 0.60). Raise if thin pools dump easily.
+- goldilocks_tp1: take profit 1 target (range: 0.20 to 0.50, i.e. +20% to +50%).
+- goldilocks_tp2: take profit 2 target (range: 0.50 to 1.50, i.e. +50% to +150%).
+- agent_max_drift: price drift tolerance (range: 0.20 to 0.60). Lower to prevent buying pumps.
+- trail_pct: trailing stop (range: 0.15 to 0.35).
+
+Be conservative: only propose changes if there is clear empirical justification from losses/wins. If settings are fine, return empty proposals []. Max 2 proposals."""
+
 
 
 def _openai_text(r):
@@ -294,27 +330,87 @@ def _lessons_from_bullets(text):
 
 
 def derive_lessons():
-    closed = db.closed_positions_with_decisions(20)
+    """Analisa histori trade closed untuk insting + usulan tuning parameter adaptif (Opsi A)."""
+    closed = db.closed_positions_with_decisions(15)
     if len(closed) < 5:
-        return []
-    # 2000 token: prompt 15-20 posisi closed itu panjang, dan via 9router
-    # (DeepSeek/GLM) anggaran 800 terpotong di tengah array JSON — sumber
-    # ValueError "tidak ada JSON di respons LLM" (lapangan 2026-10-23).
-    raw = _call(LESSONS_SYSTEM, json.dumps(closed), 2000)
+        return [], []
+    current_settings = {k: db.get(k) for k in TUNABLE_BOUNDS}
+    payload = json.dumps({
+        "current_parameters": current_settings,
+        "recent_closed_trades": closed
+    })
+    raw = _call(AUTO_TUNE_SYSTEM, payload, 1500)
+    lessons = []
+    raw_lessons = []
+    raw_proposals = []
     try:
-        items = _parse_json(raw)
-    except ValueError:
-        # model menjawab berupa daftar poin bahasa Indonesia → petik manual
-        items = _lessons_from_bullets(raw)
-    if not isinstance(items, list):
-        items = _lessons_from_bullets(raw)
-    out = []
-    for t in items[:3]:
+        data = _parse_json(raw)
+        if isinstance(data, dict):
+            raw_lessons = data.get("lessons") or []
+            raw_proposals = data.get("proposals") or []
+        elif isinstance(data, list):
+            raw_lessons = data
+    except Exception:
+        raw_lessons = _lessons_from_bullets(raw)
+
+    if not isinstance(raw_lessons, list):
+        raw_lessons = _lessons_from_bullets(raw)
+
+    for t in raw_lessons[:3]:
         t = str(t).strip()[:300]
         if t:
             db.add_lesson(t)
-            out.append(t)
-    return out
+            lessons.append(t)
+
+    # Validasi & pagar pengaman usulan tuning
+    proposals = []
+    for p in (raw_proposals if isinstance(raw_proposals, list) else [])[:2]:
+        if not isinstance(p, dict):
+            continue
+        param = str(p.get("param", "")).strip()
+        if param not in TUNABLE_BOUNDS:
+            continue
+        bounds = TUNABLE_BOUNDS[param]
+        try:
+            val = float(p.get("val", 0))
+        except (ValueError, TypeError):
+            continue
+
+        cur = float(db.get(param))
+        # Pagar 1: rentang keras
+        val = max(bounds["min"], min(bounds["max"], val))
+        # Pagar 2: delta maks ±30% per siklus
+        if cur > 0:
+            val = max(cur * 0.70, min(cur * 1.30, val))
+
+        # Format sesuai tipe data
+        if bounds["type"] is int:
+            final_val = int(round(val))
+            cur_fmt = str(int(round(cur)))
+            val_fmt = str(final_val)
+            delta_diff = abs(final_val - cur)
+        else:
+            final_val = round(val, 2)
+            cur_fmt = f"{cur:.2f}"
+            val_fmt = f"{final_val:.2f}"
+            delta_diff = abs(final_val - cur) / cur if cur > 0 else 0
+
+        # Abaikan bila perbedaan terlalu kecil (< 2%)
+        if bounds["type"] is int and delta_diff < 1:
+            continue
+        elif bounds["type"] is float and delta_diff < 0.02:
+            continue
+
+        reason = sanitize_text(p.get("reason", ""), 200)
+        proposals.append({
+            "param": param,
+            "label": bounds["label"],
+            "cur": cur_fmt,
+            "val": val_fmt,
+            "reason": reason
+        })
+
+    return lessons, proposals
 
 
 # ---------- 💬 TANYA: Q&A bebas grounded ke data bot ----------

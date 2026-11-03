@@ -701,13 +701,28 @@ async def _route(event, data):
                 lines.append(f"• [{d['role']}] **{d['action']} {d['symbol']}** ({d['conviction']}){oc}\n  _{d['reason'][:100]}_")
             await event.respond("\n".join(lines))
     elif data == "agt:lessons":
-        await event.answer("melatih insting dari posisi closed…")
+        await event.answer("melatih insting & evaluasi parameter…")
         try:
-            out = await __import__("asyncio").to_thread(agent.derive_lessons)
-            if out:
-                await event.respond("💡 **Insting baru terbentuk:**\n" + "\n".join(f"• {t}" for t in out))
+            lessons, proposals = await __import__("asyncio").to_thread(agent.derive_lessons)
+            if not lessons and not proposals:
+                return await event.respond("Belum cukup pengalaman — butuh ≥5 posisi closed buat melatih insting.")
+
+            lines = []
+            if lessons:
+                lines.append("💡 **Insting terbentuk:**")
+                lines.extend(f"• {t}" for t in lessons)
+
+            buttons = []
+            if proposals:
+                lines.append("\n⚙️ **Usulan Auto-Tuner (Evaluasi Parameter):**")
+                for prop in proposals:
+                    lines.append(f"• **{prop['label']}**: `{prop['cur']}` → `{prop['val']}`\n  _{prop['reason']}_")
+                    buttons.append([Button.inline(f"✅ Terapkan: {prop['label']} = {prop['val']}", f"applyset:{prop['param']}:{prop['val']}")])
+                buttons.append([Button.inline("❌ Abaikan Usulan", b"tune:dismiss")])
             else:
-                await event.respond("Belum cukup pengalaman — butuh ≥5 posisi closed buat melatih insting.")
+                lines.append("\n⚙️ Parameter trading saat ini dinilai sudah optimal.")
+
+            await event.respond("\n".join(lines), buttons=buttons if buttons else None)
         except Exception as e:
             await event.respond(f"⚠️ gagal melatih insting: {e}")
     elif data.startswith("applyset:"):
@@ -716,7 +731,16 @@ async def _route(event, data):
             return await event.answer("⛔ key tidak diizinkan", alert=True)
         db.set_(key, val)
         await event.answer(f"✅ {key} → {val}")
-        await event.respond(f"🎓 Diterapkan: **{key} = {val}**")
+        try:
+            await event.edit(f"{event.text}\n\n✅ **Diterapkan oleh operator:** `{key} = {val}`", buttons=None)
+        except Exception:
+            await event.respond(f"🎓 Diterapkan: **{key} = {val}**")
+    elif data == "tune:dismiss":
+        await event.answer("Usulan diabaikan")
+        try:
+            await event.edit(f"{event.text}\n\n❌ **Usulan diabaikan.**", buttons=None)
+        except Exception:
+            pass
     elif data == "wallet":
         t, b = wallet_panel()
         await event.edit(t, buttons=b)

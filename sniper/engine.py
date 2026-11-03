@@ -737,12 +737,28 @@ def build_recap(since_ts: int) -> str:
 
 
 async def _auto_insting():
-    """Latih insting otomatis tiap 5 posisi closed."""
+    """Latih insting otomatis tiap 5 posisi closed + usulan tuning parameter (Opsi A)."""
     from . import agent
+    from telethon import Button
     try:
-        out = await asyncio.to_thread(agent.derive_lessons)
-        if out:
-            await _notify("💡 **Insting baru (otomatis, dari 5 close terakhir):**\n" +
-                          "\n".join(f"• {t}" for t in out))
+        lessons, proposals = await asyncio.to_thread(agent.derive_lessons)
+        if not lessons and not proposals:
+            return
+
+        lines = []
+        if lessons:
+            lines.extend(f"• {t}" for t in lessons)
+
+        buttons = []
+        if proposals:
+            lines.append("\n⚙️ **Usulan Auto-Tuner (Evaluasi Parameter):**")
+            for prop in proposals:
+                lines.append(f"• **{prop['label']}**: `{prop['cur']}` → `{prop['val']}`\n  _{prop['reason']}_")
+                buttons.append([Button.inline(f"✅ Terapkan: {prop['label']} = {prop['val']}", f"applyset:{prop['param']}:{prop['val']}")])
+            buttons.append([Button.inline("❌ Abaikan Usulan", b"tune:dismiss")])
+
+        tail = (" (otomatis, dari 5 close terakhir):**\n" + "\n".join(lines)) if lines else " (otomatis):**\n_tidak ada data_"
+        if _notify:
+            await _notify("💡 **Insting baru" + tail, buttons=buttons if buttons else None)
     except Exception as e:
         print(f"[auto-insting fail] {e}")
