@@ -12,6 +12,7 @@ from . import config, db, engine, agent, fmt
 _pending = {}  # admin_id -> action string ("add_source" | "set:key" | "insaddr")
 _trader = None
 _user = None  # userbot Telethon (buat resolve channel publik via get_entity)
+_bot = None  # bot Telethon client (buat scheduling auto-dismiss proposal)
 
 # ======================= PANEL INSIDER (v16.6) =======================
 # Submenu di 📡 Sources. Builders = fungsi murni (diuji tanpa Telethon),
@@ -458,11 +459,35 @@ def agent_panel():
     return "\n".join(lines), buttons
 
 
+async def schedule_auto_dismiss(msg, timeout_sec=300):
+    """Batalkan / abaikan usulan secara otomatis jika tidak ada aksi setelah timeout_sec."""
+    if not msg:
+        return
+    await asyncio.sleep(timeout_sec)
+    try:
+        client = getattr(msg, "client", None) or _bot
+        if not client:
+            return
+        chat_id = getattr(msg, "chat_id", None) or config.ADMIN_ID
+        msg_id = getattr(msg, "id", None)
+        if not msg_id:
+            return
+        latest = await client.get_messages(chat_id, ids=msg_id)
+        if latest and getattr(latest, "button_count", 0) > 0:
+            await latest.edit(
+                f"{latest.text}\n\n⏳ **Usulan diabaikan otomatis (tidak ada aksi dalam 5 menit).**",
+                buttons=None
+            )
+    except Exception as e:
+        print(f"[auto-dismiss fail] {e}")
+
+
 # ---------- register handlers ----------
 def register(bot, trader, user_client=None):
-    global _trader, _user
+    global _trader, _user, _bot
     _trader = trader
     _user = user_client
+    _bot = bot
 
     @bot.on(events.NewMessage(pattern=r"^/start|^/menu"))
     async def start(event):
@@ -703,16 +728,16 @@ async def _route(event, data):
     elif data == "agt:lessons":
         await event.answer("melatih insting & evaluasi parameter…")
         try:
-            n_closed = len(db.closed_positions_with_decisions(5))
-            if n_closed < 5:
-                return await event.respond(f"Belum cukup data — butuh ≥5 posisi closed (saat ini {n_closed}).")
+            n_closed = len(db.closed_positions_with_decisions(15))
+            if n_closed < 15:
+                return await event.respond(f"Belum cukup data — butuh ≥15 posisi closed (saat ini {n_closed}).")
             lessons, proposals = await __import__("asyncio").to_thread(agent.derive_lessons)
             if not lessons and not proposals:
                 return await event.respond("⚠️ Evaluasi LLM belum menghasilkan poin baru. Coba sesaat lagi.")
 
             lines = []
             if lessons:
-                lines.append("💡 **Insting terbentuk:**")
+                lines.append("💡 **Insting terbentuk (15 trade terakhir):**")
                 lines.extend(f"• {t}" for t in lessons)
 
             buttons = []
@@ -722,10 +747,13 @@ async def _route(event, data):
                     lines.append(f"• **{prop['label']}**: `{prop['cur']}` → `{prop['val']}`\n  _{prop['reason']}_")
                     buttons.append([Button.inline(f"✅ Terapkan: {prop['label']} = {prop['val']}", f"applyset:{prop['param']}:{prop['val']}")])
                 buttons.append([Button.inline("❌ Abaikan Usulan", b"tune:dismiss")])
+                lines.append("\n⏳ _Usulan berlaku 5 menit (otomatis diabaikan jika tidak direspon)._")
             else:
                 lines.append("\n⚙️ Parameter trading saat ini dinilai sudah optimal.")
 
-            await event.respond("\n".join(lines), buttons=buttons if buttons else None)
+            sent_msg = await event.respond("\n".join(lines), buttons=buttons if buttons else None)
+            if sent_msg and buttons:
+                asyncio.create_task(schedule_auto_dismiss(sent_msg, 300))
         except Exception as e:
             await event.respond(f"⚠️ gagal melatih insting: {e}")
     elif data.startswith("applyset:"):

@@ -278,8 +278,11 @@ def test_too_many_entries_speed():
         hit, _ = cg.too_many_entries(A, symbol="Marvin", name="Marvin The Martian")
         dt_ms = (time.perf_counter() - t0) * 1000
         assert hit, _
-        assert dt_ms < 20, f"too_many_entries {dt_ms:.1f} ms (wajib < 20 ms)"
-        print(f"PASS too_many_entries cepat ({dt_ms:.1f} ms < 20 ms)")
+        # Ambang longgar (75 ms) sengaja: yang diuji "nol panggilan jaringan"
+        # (kalau ada HTTP, latensinya detik-an). Ambang ketat 20 ms rapuh saat
+        # VPS juga menjalankan bot + scanner (pernah 31 ms → suite merah palsu).
+        assert dt_ms < 75, f"too_many_entries {dt_ms:.1f} ms (wajib < 75 ms)"
+        print(f"PASS too_many_entries cepat ({dt_ms:.1f} ms < 75 ms)")
     finally:
         cg._bs_get = _bs
         _torn_down(path, old)

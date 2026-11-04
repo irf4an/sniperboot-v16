@@ -332,7 +332,7 @@ def _lessons_from_bullets(text):
 def derive_lessons():
     """Analisa histori trade closed untuk insting + usulan tuning parameter adaptif (Opsi A)."""
     closed = db.closed_positions_with_decisions(15)
-    if len(closed) < 5:
+    if len(closed) < 15:
         return [], []
     current_settings = {k: db.get(k) for k in TUNABLE_BOUNDS}
     compact = []

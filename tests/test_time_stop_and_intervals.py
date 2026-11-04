@@ -58,7 +58,11 @@ class FakeDB:
         pass
 
     def stats(self):
-        return {"tp2": 0, "sl": 0, "manual": 0, "rug": 0, "trail": 0}
+        return {"tp2": 0, "sl": 0, "manual": 0, "rug": 0, "trail": 0, "timeout": 0}
+
+    def count_closed(self):
+        # pemicu Auto-Tuner (kelipatan 15) — di tes ini tidak boleh memicu
+        return 7
 
     def add_paper_cash(self, amount):
         return 100.0

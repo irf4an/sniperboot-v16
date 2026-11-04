@@ -257,12 +257,15 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     # is_close HANYA bila seluruh token benar-benar habis (full exit) atau
     # stop-out total. TP1 dan TP2 parsial (skema exit 3 lapis) mengeposkan
     # posisi tetap OPEN — bukan penutupan — jadi jangan anggap is_close.
-    is_close = (reason in ("sl", "rug", "trail")) or (fraction >= 1.0 or left <= 0)
+    is_close = (reason in ("sl", "rug", "trail", "timeout")) or (fraction >= 1.0 or left <= 0)
+    # Pemicu Auto-Tuner TIDAK BOLEH menggagalkan exit: bungkus try/except.
     if is_close and db.get("agent_auto_insting", str) == "1" and config.LLM_API_KEY:
-        st = db.stats()
-        total_closed = st["tp2"] + st["sl"] + st["manual"] + st["rug"] + st["trail"] + 1
-        if total_closed >= 5 and total_closed % 5 == 0:
-            asyncio.create_task(_auto_insting())
+        try:
+            total_closed = db.count_closed()
+            if total_closed >= 15 and total_closed % 15 == 0:
+                asyncio.create_task(_auto_insting())
+        except Exception as e:
+            print(f"[auto-insting trigger fail] {e}")
     if reason in ("tp2", "sl", "rug", "trail") or (reason == "manual" and (fraction >= 1 or left <= 0)):
         db.mark_decision_outcome(pos["ca"], f"{reason} real {real_pnl*100:+.0f}% (layar {spot_pnl*100:+.0f}%)")
 
@@ -737,8 +740,8 @@ def build_recap(since_ts: int) -> str:
 
 
 async def _auto_insting():
-    """Latih insting otomatis tiap 5 posisi closed + usulan tuning parameter (Opsi A)."""
-    from . import agent
+    """Latih insting otomatis tiap 15 posisi closed + usulan tuning parameter (Opsi A)."""
+    from . import agent, control_bot
     from telethon import Button
     try:
         lessons, proposals = await asyncio.to_thread(agent.derive_lessons)
@@ -756,9 +759,12 @@ async def _auto_insting():
                 lines.append(f"• **{prop['label']}**: `{prop['cur']}` → `{prop['val']}`\n  _{prop['reason']}_")
                 buttons.append([Button.inline(f"✅ Terapkan: {prop['label']} = {prop['val']}", f"applyset:{prop['param']}:{prop['val']}")])
             buttons.append([Button.inline("❌ Abaikan Usulan", b"tune:dismiss")])
+            lines.append("\n⏳ _Usulan berlaku 5 menit (otomatis diabaikan jika tidak direspon)._")
 
-        tail = (" (otomatis, dari 5 close terakhir):**\n" + "\n".join(lines)) if lines else " (otomatis):**\n_tidak ada data_"
+        tail = (" (otomatis, dari 15 close terakhir):**\n" + "\n".join(lines)) if lines else " (otomatis):**\n_tidak ada data_"
         if _notify:
-            await _notify("💡 **Insting baru" + tail, buttons=buttons if buttons else None)
+            sent_msg = await _notify("💡 **Insting baru" + tail, buttons=buttons if buttons else None)
+            if sent_msg and buttons:
+                asyncio.create_task(control_bot.schedule_auto_dismiss(sent_msg, 300))
     except Exception as e:
         print(f"[auto-insting fail] {e}")

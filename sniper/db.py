@@ -409,6 +409,18 @@ def recent_lessons(n=5):
         return [dict(r) for r in c.execute("SELECT * FROM lessons ORDER BY id DESC LIMIT ?", (n,))]
 
 
+def count_closed():
+    """Jumlah posisi yang benar-benar sudah ditutup (semua status closed*).
+
+    Dipakai pemicu Auto-Tuner: tiap kelipatan 15 close. Dihitung langsung dari
+    tabel positions supaya tidak bergantung pada penjumlahan stats() yang
+    gampang dobel-hitung (tp2_done vs status).
+    """
+    with _lock, _conn() as c:
+        return c.execute(
+            "SELECT COUNT(*) FROM positions WHERE status LIKE 'closed%'").fetchone()[0]
+
+
 def closed_positions_with_decisions(n=20):
     with _lock, _conn() as c:
         rows = c.execute("""SELECT p.symbol, p.status, p.usd_spent, p.realized_eth,

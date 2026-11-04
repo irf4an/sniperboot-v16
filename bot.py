@@ -157,9 +157,10 @@ async def main():
 
     async def notify(text, buttons=None):
         try:
-            await bot.send_message(config.ADMIN_ID, text, buttons=buttons, link_preview=False)
+            return await bot.send_message(config.ADMIN_ID, text, buttons=buttons, link_preview=False)
         except Exception as e:
             print(f"[notify fail] {e}\n{text}")
+            return None
 
     async def public_notify(text, buttons=None):
         """Siaran LOG PUBLIK: hanya log filter koin (dari listener) yang
