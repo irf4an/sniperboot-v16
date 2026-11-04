@@ -263,7 +263,14 @@ def test_family_keys_full_hierarchy():
 
 
 def test_too_many_entries_speed():
-    """too_many_entries + family_keys harus < 20 ms (wajib DB-only + cepat)."""
+    """too_many_entries + family_keys harus < 20 ms (wajib DB-only + cepat).
+
+    Ambang dikunci ketat 20 ms, tapi diukur BEST-OF-3 (latensi terbaik dari 3
+    percobaan). Tujuannya: membuktikan jalur ini nol panggilan jaringan, tanpa
+    ikut menangkap noise penjadwalan CPU saat VPS juga menjalankan bot+scanner
+    (dulu sekali terukur 31 ms → suite merah palsu). Panggilan HTTP sungguhan
+    tetap tidak mungkin lolos: latensinya ratusan ms, bukan 20-an ms.
+    """
     path, old = _fresh_db()
     _bs = cg._bs_get
     try:
@@ -274,15 +281,17 @@ def test_too_many_entries_speed():
             for i in range(50):
                 c.execute("INSERT OR IGNORE INTO entry_log(key,ca,ts) VALUES(?,?,?)",
                           (f"sym:marvin|marvin the martian", f"0x{i:040x}", now))
-        t0 = time.perf_counter()
-        hit, _ = cg.too_many_entries(A, symbol="Marvin", name="Marvin The Martian")
-        dt_ms = (time.perf_counter() - t0) * 1000
+        samples = []
+        hit = False
+        for _ in range(3):
+            t0 = time.perf_counter()
+            hit, _ = cg.too_many_entries(A, symbol="Marvin", name="Marvin The Martian")
+            samples.append((time.perf_counter() - t0) * 1000)
+        dt_ms = min(samples)
         assert hit, _
-        # Ambang longgar (75 ms) sengaja: yang diuji "nol panggilan jaringan"
-        # (kalau ada HTTP, latensinya detik-an). Ambang ketat 20 ms rapuh saat
-        # VPS juga menjalankan bot + scanner (pernah 31 ms → suite merah palsu).
-        assert dt_ms < 75, f"too_many_entries {dt_ms:.1f} ms (wajib < 75 ms)"
-        print(f"PASS too_many_entries cepat ({dt_ms:.1f} ms < 75 ms)")
+        assert dt_ms < 20, f"too_many_entries {dt_ms:.1f} ms (wajib < 20 ms, sampel {samples})"
+        print(f"PASS too_many_entries cepat ({dt_ms:.1f} ms < 20 ms, best-of-3 dari "
+              f"{', '.join(f'{s:.1f}' for s in samples)})")
     finally:
         cg._bs_get = _bs
         _torn_down(path, old)
