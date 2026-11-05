@@ -34,12 +34,14 @@ BS = config.BLOCKSCOUT_API.rstrip("/")
 
 
 def _bs_get(path: str, timeout: float = 8):
-    """GET Blockscout → dict, atau None (tanpa raise)."""
+    """GET Blockscout → dict, atau None (tanpa raise).
+
+    Lewat rantai egress `safety._get` (direct → Worker → jina.ai) karena
+    Cloudflare memberi managed challenge 403 ke IP VPS ini.
+    """
     try:
-        r = _S.get(f"{BS}{path}", timeout=timeout)
-        if r.status_code != 200:
-            return None
-        return r.json()
+        from . import safety
+        return safety._get(path)
     except Exception:
         return None
 

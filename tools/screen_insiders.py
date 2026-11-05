@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from curl_cffi import requests as crequests  # noqa: E402
 from sniper import config, db, geckoterminal as gt  # noqa: E402
+from sniper import safety  # noqa: E402
 from sniper import dexscreener as dx  # noqa: E402
 from sniper.tracker import QUOTE_ASSETS  # noqa: E402
 
@@ -200,8 +201,9 @@ def fetch_early_buyers_ex(ca: str, max_buyers=50, retries=2) -> tuple[str, list[
     items = None
     for attempt in range(retries + 1):
         try:
-            r = _get(url)
-            data = r.json()
+            # Lewat rantai egress safety: direct → Worker → jina.ai.
+            # Direct selalu 403 (Cloudflare managed challenge di IP VPS).
+            data = safety._get(f"/tokens/{ca}/transfers")
             if not isinstance(data, dict):
                 raise TypeError(f"respons bukan objek JSON ({type(data).__name__})")
             items = data.get("items") or []

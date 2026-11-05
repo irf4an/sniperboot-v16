@@ -4,13 +4,17 @@ Sumber data: Blockscout Robinhood Chain (deployer & daftar holder) + RPC
 (balanceOf/totalSupply). Sync — panggil via asyncio.to_thread.
 """
 import functools
+import json as _json
 try:
     from curl_cffi import requests as _requests
     _S = _requests.Session(impersonate="chrome120")
+    # r.jina.ai menolak (403) sesi ber-impersonate browser → pakai sesi polos.
+    _S_PLAIN = _requests.Session()
 except ImportError:
     import requests as _requests
     _S = _requests.Session()
     _S.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+    _S_PLAIN = _S
     print("[safety] ⚠️ PERINGATAN: curl_cffi belum terpasang! Query explorer Blockscout akan diblokir Cloudflare 403 (fail-closed). Jalankan: pip install curl_cffi")
 from web3 import Web3
 from . import config, db
@@ -26,10 +30,116 @@ TOTAL_SUPPLY_ABI = [{
 }]
 
 
-def _get(path, params=None):
-    r = _S.get(f"{config.BLOCKSCOUT_API}{path}", params=params, timeout=10)
+def _bs_url(path, params=None) -> str:
+    from urllib.parse import urlencode
+    url = f"{config.BLOCKSCOUT_API}{path}"
+    if params:
+        url += ("&" if "?" in url else "?") + urlencode(params)
+    return url
+
+
+# ---------------- Egress berlapis Blockscout (v16.13) ----------------
+# Cloudflare memberi "managed challenge" (header cf-mitigated: challenge) ke
+# IP datacenter VPS ini → request langsung SELALU 403 (bukan rate limit: tidak
+# ada 429/Retry-After, respons 61 ms). Sementara IP lain dapat 200 JSON.
+#
+# Urutan percobaan:
+#   1. direct           — cepat & murah; dilewati 10 menit kalau sudah kena 403
+#   2. Worker sendiri   — setting `blockscout_proxy_url` (egress Cloudflare)
+#   3. r.jina.ai        — jaring pengaman publik (X-Return-Format: text → JSON murni)
+_DIRECT_COOLDOWN = 600.0
+_direct_blocked_until = 0.0
+_JINA = "https://r.jina.ai/"
+
+
+def _parse_json(r):
     r.raise_for_status()
-    return r.json()
+    try:
+        obj = r.json()
+    except Exception:
+        txt = (r.text or "").strip()
+        # r.jina.ai bisa membungkus: "Title:/URL Source:/Markdown Content:"
+        if "Markdown Content:" in txt:
+            txt = txt.split("Markdown Content:", 1)[1].strip()
+        obj = _json.loads(txt)
+    # r.jina.ai juga bisa membungkus dalam envelope {"code":200,"data":{"text":...}}
+    if (isinstance(obj, dict) and isinstance(obj.get("data"), dict)
+            and isinstance(obj["data"].get("text"), str) and "status" in obj):
+        try:
+            return _json.loads(obj["data"]["text"])
+        except Exception:
+            return obj
+    return obj
+
+
+def _get_direct(url):
+    return _parse_json(_S.get(url, timeout=8))
+
+
+def _get_worker(url):
+    base = (db.get("blockscout_proxy_url", str) or "").strip()
+    if not base:
+        raise RuntimeError("worker proxy belum diset")
+    from urllib.parse import quote
+    sep = "&" if "?" in base else "?"
+    r = _S.get(f"{base}{sep}url={quote(url, safe='')}", timeout=10)
+    return _parse_json(r)
+
+
+def _get_jina(url):
+    import os
+    key = os.getenv("JINA_API_KEY") or (db.get("jina_api_key", str) or "")
+    headers = {"X-Return-Format": "text", "Accept": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    r = _S_PLAIN.get(f"{_JINA}{url}", timeout=25, headers=headers)
+    return _parse_json(r)
+
+
+def _get(path, params=None, timeout=10):
+    """GET Blockscout dengan rantai egress: direct → Worker → jina.ai.
+
+    Respons sukses di-cache 10 detik di memori: scanner sering memeriksa CA
+    yang sama berulang dalam satu burst, dan tiap panggilan lewat jalur
+    cadangan berbiaya ~0,7 s.
+    """
+    global _direct_blocked_until
+    import time as _t
+    url = _bs_url(path, params)
+    hit = _CACHE.get(url)
+    if hit and _t.time() - hit[0] < _CACHE_TTL:
+        return hit[1]
+    errs = []
+    if _t.time() >= _direct_blocked_until:
+        try:
+            data = _get_direct(url)
+            _cache_put(url, data)
+            return data
+        except Exception as e:
+            errs.append(f"direct:{e}")
+            # 403 = challenge Cloudflare → berhenti mencoba direct sementara
+            if "403" in str(e):
+                _direct_blocked_until = _t.time() + _DIRECT_COOLDOWN
+    for name, fn in (("worker", _get_worker), ("jina", _get_jina)):
+        try:
+            data = fn(url)
+            _cache_put(url, data)
+            return data
+        except Exception as e:
+            errs.append(f"{name}:{e}")
+    raise RuntimeError("Blockscout gagal via semua jalur — " + " | ".join(errs))
+
+
+_CACHE: dict = {}
+_CACHE_TTL = 10.0
+_CACHE_MAX = 256
+
+
+def _cache_put(url, data):
+    import time as _t
+    if len(_CACHE) >= _CACHE_MAX:
+        _CACHE.clear()
+    _CACHE[url] = (_t.time(), data)
 
 
 def creator_of(ca: str, cache: bool = True):

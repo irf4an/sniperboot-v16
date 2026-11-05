@@ -188,6 +188,11 @@ SETTING_DEFAULTS = {
     # sendiri → ditolak saat rekrutmen, dibersihkan dari insider_buys, dan
     # masuk sybil_blacklist supaya tidak direkrut ulang.
     "funder_ban_min_deployers":      "3",
+    # ---- 🌐 Egress Blockscout (v16.13) ----
+    # Cloudflare memberi managed challenge ke IP VPS → direct 403. Isi dengan
+    # URL Worker proxy sendiri (mis. https://bs.ahmdirfnnna.my.id/fetch) supaya
+    # request lewat egress Cloudflare. Kosong → pakai jaring pengaman r.jina.ai.
+    "blockscout_proxy_url":          "",
     # ---- 🛡️ Clone guard / operator-family guard (v16.6) ----
     # Entry rate-limit per keluarga operator: maks N CA DISTINCT per keluarga
     # dalam jendela H jam. Bukan blacklist token — Pons tipe apa pun tetap
