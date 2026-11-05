@@ -37,6 +37,11 @@ export default {
     const u = new URL(request.url);
     let target;
 
+    // cek kesehatan cepat: /health
+    if (u.pathname === "/health") {
+      return json({ ok: true, service: "bs-proxy", version: "1.0", ts: Date.now() }, 200);
+    }
+
     const raw = u.searchParams.get("url");
     if (raw) {
       try {
