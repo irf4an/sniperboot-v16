@@ -757,6 +757,24 @@ def record_insider_result(address: str, won: bool) -> dict:
         return {"address": address, "action": "loss", "disabled": False}
 
 
+def delete_insiders(addresses) -> int:
+    """Hapus PERMANEN baris insider_wallets + riwayat belinya.
+
+    Dipakai untuk pembersihan manual dompet tidur. Beda dengan
+    `prune_stale_insiders()` yang hanya mematikan (enabled=0) supaya riwayat
+    win tetap tersimpan. Return jumlah baris wallet yang terhapus.
+    """
+    addrs = [str(a).strip().lower() for a in (addresses or []) if a]
+    if not addrs:
+        return 0
+    q = ",".join("?" * len(addrs))
+    with _lock, _conn() as c:
+        _init_insider_wallets(c)
+        c.execute(f"DELETE FROM insider_buys WHERE wallet IN ({q})", addrs)
+        cur = c.execute(f"DELETE FROM insider_wallets WHERE address IN ({q})", addrs)
+        return cur.rowcount
+
+
 def prune_stale_insiders(max_inactive_days: int = 3) -> int:
     """Nonaktifkan wallet insider yang lama tak terlihat ATAU terbukti
     boncos: last_seen > 0 dan tak aktif >= max_inactive_days hari (default

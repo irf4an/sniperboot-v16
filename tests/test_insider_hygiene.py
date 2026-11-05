@@ -144,10 +144,37 @@ def test_prune_now_works_and_protects_winners():
         _restore(path, old)
 
 
+def test_delete_insiders_hard_removes():
+    """delete_insiders() = hapus permanen wallet + riwayat belinya."""
+    path, old = _fresh_db()
+    try:
+        addrs = ("0x" + "a1" * 20, "0x" + "b2" * 20)
+        with db._lock, db._conn() as c:
+            db._init_insider_wallets(c)
+            db._init_insider_buys(c)
+            for a in addrs:
+                c.execute("""INSERT OR REPLACE INTO insider_wallets
+                             (address,label,win_count,enabled,added_at,last_seen)
+                             VALUES(?,?,?,?,?,?)""",
+                          (a, "pruned_passive", 41, 0, 1, 1))
+                c.execute("""INSERT INTO insider_buys(ca,wallet,symbol,ts)
+                             VALUES(?,?,?,?)""", (CA1, a, "T", 1))
+        n = db.delete_insiders(addrs)
+        assert n == 2, f"harus hapus 2 wallet, dapat {n}"
+        with db._lock, db._conn() as c:
+            left = c.execute("SELECT COUNT(*) FROM insider_wallets").fetchone()[0]
+            buys = c.execute("SELECT COUNT(*) FROM insider_buys").fetchone()[0]
+        assert left == 0 and buys == 0, f"sisa wallet={left} buys={buys}"
+        print("PASS delete_insiders hapus permanen wallet + riwayat")
+    finally:
+        _restore(path, old)
+
+
 if __name__ == "__main__":
     test_funder_rejected_on_recruit()
     test_funder_buy_not_recorded()
     test_buy_updates_last_seen()
     test_purge_operator_funders()
     test_prune_now_works_and_protects_winners()
+    test_delete_insiders_hard_removes()
     print("\n✅ SEMUA TES HIGIENE INSIDER LULUS")

@@ -72,8 +72,10 @@ export default {
       const upstream = await fetch(target.toString(), {
         method: "GET",
         headers: {
-          accept: "application/json",
-          "user-agent": "hoodsniper-worker/1.0",
+          accept: "application/json, text/plain, */*",
+          "accept-language": "en-US,en;q=0.9",
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         },
         cf: { cacheTtl: CACHE_TTL, cacheEverything: true },
       });
