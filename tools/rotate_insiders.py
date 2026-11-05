@@ -48,6 +48,10 @@ def rotate(runner_limit: int = DEFAULT_RUNNER_LIMIT,
     disabled = 0 if dry else db.prune_stale_insiders(max_inactive_days)
     if not dry and (db.get("sybil_cluster_guard_on", str) or "1") == "1":
         db.detect_and_purge_sybil_clusters()
+    # 1b. Buang funder/launcher: wallet yang membiayai banyak deployer bukan
+    #     trader organik (sinyalnya = dev beli koin sendiri). Langsung di-ban
+    #     permanen supaya tidak direkrut ulang putaran berikutnya.
+    funder_ban = {"banned": 0} if dry else db.purge_operator_funders()
 
     # 2. Ambil koin runner terbaru
     runners = si.fetch_gainers(runner_limit)
@@ -76,6 +80,7 @@ def rotate(runner_limit: int = DEFAULT_RUNNER_LIMIT,
     total_active = 0 if dry else len(db.list_insiders(only_enabled=True))
 
     summary = {"added": added,
+               "funder_banned": funder_ban["banned"],
                "disabled": disabled,
                "total_active": total_active,
                "runners": len(runners),
@@ -95,6 +100,7 @@ def _print_summary(runners, new_rows, summary):
         print(f"    {'✅' if r.get('qualifies') else '· '} {r['address']}  "
               f"skor={r['score']:.2f}  win={r['n_ca']}")
     print(f"  wallet dinonaktifkan (prune) : {summary['disabled']}")
+    print(f"  funder/launcher di-ban       : {summary.get('funder_banned', 0)}")
     print(f"  total wallet aktif sekarang  : {summary['total_active']}")
     if summary["dry"]:
         print("  (DRY-RUN — tidak ada perubahan DB)")

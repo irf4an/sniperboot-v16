@@ -619,6 +619,86 @@ def wallet_count() -> int:
 # Tabel kandidat "smart money": wallet yang terbukti masuk lebih dari satu
 # koin pemenang di fase awal (hasil screening tools/screen_insiders.py).
 # Tidak menyimpan private key — alamat publik + skor jejaknya saja.
+#
+# ⚠️ ANTI-FUNDER (v16.12): wallet yang terbukti MEMBIAYAI banyak deployer di
+# operator_funders bukan trader organik — itu infrastruktur launcher/dev.
+# Sinyal beli dari wallet begini = ikut-ikutan dev beli koin sendiri (risiko
+# rug), jadi TIDAK BOLEH masuk hitungan organic insider.
+def _funder_min_deployers() -> int:
+    try:
+        return max(1, int(get("funder_ban_min_deployers", str) or 3))
+    except Exception:
+        return 3
+
+
+def _has_table(c, name: str) -> bool:
+    return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                     (name,)).fetchone() is not None
+
+
+def is_operator_funder(address, min_deployers=None) -> bool:
+    """True bila address pernah MEMBIAYAI >= min_deployers deployer berbeda.
+
+    DB-only (tanpa RPC/jaringan). Fail-open: tabel operator_funders belum ada
+    atau address kosong → False.
+    """
+    a = str(address or "").strip().lower()
+    if len(a) != 42 or not a.startswith("0x"):
+        return False
+    n = int(min_deployers if min_deployers is not None else _funder_min_deployers())
+    try:
+        with _lock, _conn() as c:
+            if not _has_table(c, "operator_funders"):
+                return False
+            d = c.execute("""SELECT COUNT(DISTINCT deployer) FROM operator_funders
+                             WHERE funder = ?""", (a,)).fetchone()[0]
+        return int(d or 0) >= n
+    except Exception:
+        return False
+
+
+def purge_operator_funders(min_deployers=None) -> dict:
+    """Sapu wallet insider yang sebenarnya funder/launcher.
+
+    Untuk setiap wallet di insider_wallets yang terbukti membiayai >= N
+    deployer:
+      • enabled = 0, label = 'operator_funder'
+      • masuk sybil_blacklist (alasan 'operator funder') → tidak bisa direkrut lagi
+      • seluruh baris insider_buys-nya dihapus (bukan sinyal organik)
+    Return {'banned': n, 'wallets': [...]}.
+    """
+    n = int(min_deployers if min_deployers is not None else _funder_min_deployers())
+    banned = []
+    now = int(time.time())
+    with _lock, _conn() as c:
+        _init_insider_wallets(c)
+        if not _has_table(c, "operator_funders"):
+            return {"banned": 0, "wallets": []}
+        rows = c.execute("""
+            SELECT w.address, COUNT(DISTINCT f.deployer) AS n_dep
+            FROM insider_wallets w
+            JOIN operator_funders f ON f.funder = w.address
+            GROUP BY w.address HAVING n_dep >= ?
+        """, (n,)).fetchall()
+        for r in rows:
+            addr, ndep = r["address"].lower(), int(r["n_dep"])
+            c.execute("""UPDATE insider_wallets
+                         SET enabled = 0, label = 'operator_funder', notes = ?
+                         WHERE address = ?""",
+                      (f"funder {ndep} deployer — bukan trader organik", addr))
+            try:
+                c.execute("""INSERT OR REPLACE INTO sybil_blacklist
+                             (address, reason, ca, wallet_count, span_sec, detected_at)
+                             VALUES (?, ?, NULL, ?, 0, ?)""",
+                          (addr, f"operator funder (biayai {ndep} deployer)",
+                           1, now))
+            except sqlite3.OperationalError:
+                pass
+            c.execute("DELETE FROM insider_buys WHERE wallet = ?", (addr,))
+            banned.append(addr)
+    return {"banned": len(banned), "wallets": banned}
+
+
 def _init_insider_wallets(c):
     c.execute("""CREATE TABLE IF NOT EXISTS insider_wallets(
         address   TEXT PRIMARY KEY,
@@ -638,6 +718,14 @@ def _init_insider_wallets(c):
             c.execute(f"ALTER TABLE insider_wallets ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass
+    # Backfill sekali jalan: wallet lama punya last_seen=0 sehingga prune
+    # (syarat last_seen > 0) tidak pernah bisa jalan → tabel hanya menambah.
+    # Pakai added_at sebagai baseline "terakhir terlihat" agar rotasi benar
+    # benar bisa membuang wallet yang tak pernah bunyi.
+    c.execute("""UPDATE insider_wallets
+                 SET last_seen = COALESCE(NULLIF(added_at, 0), ?)
+                 WHERE last_seen IS NULL OR last_seen = 0""",
+              (int(time.time()),))
 
 
 def record_insider_result(address: str, won: bool) -> dict:
@@ -700,6 +788,10 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
     # sempat memasukkan 0x…dead dan mencemari 60% tabel insider_buys.
     if not is_trackable_wallet(address) or is_sybil_blacklisted(address):
         return False
+    # 🚫 Funder/launcher (membiayai banyak deployer) bukan trader organik:
+    # sinyalnya = dev beli koin sendiri. Tolak sejak perekrutan.
+    if is_operator_funder(address):
+        return False
     with _lock, _conn() as c:
         _init_insider_wallets(c)
         if update_if_exists:
@@ -715,8 +807,8 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
                           "THEN excluded.score ELSE MAX(score, excluded.score) END")
             c.execute(f"""INSERT INTO insider_wallets
                 (address,label,win_count,enabled,added_at,notes,win_cas,
-                 score,sources,last_verified)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                 score,sources,last_verified,last_seen)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(address) DO UPDATE SET
                     win_count = {wins_expr},
                     score = {score_expr},
@@ -729,14 +821,17 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
                                                THEN excluded.win_cas
                                                ELSE win_cas || ',' || excluded.win_cas END END""",
                 (address, label, int(win_count), int(enabled), int(time.time()),
-                 notes, win_cas, float(score), sources, int(last_verified)))
+                 notes, win_cas, float(score), sources, int(last_verified),
+                 int(time.time())))
         else:
             c.execute("""INSERT OR IGNORE INTO insider_wallets
                 (address,label,win_count,enabled,added_at,notes,win_cas,
-                 score,sources,last_verified)
-                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                 score,sources,last_verified,last_seen)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (address, label, int(win_count), int(enabled), int(time.time()),
-                 notes, win_cas, float(score), sources, int(last_verified)))
+                 notes, win_cas, float(score), sources, int(last_verified),
+                 int(time.time())))
+    return True
 
 
 def get_active_insiders() -> list:
@@ -810,14 +905,22 @@ def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
         w_clean = str(wallet).strip().lower()
         if not is_trackable_wallet(w_clean) or is_sybil_blacklisted(w_clean):
             return
+        # Funder/launcher bukan trader organik — jangan kotori hitungan breadth.
+        if is_operator_funder(w_clean):
+            return
     now = int(ts if ts is not None else time.time())
     with _lock, _conn() as c:
         _init_insider_buys(c)
+        _init_insider_wallets(c)
         c.execute("""INSERT INTO insider_buys(ca,wallet,symbol,mcap,liq,pair_address,ts)
                      VALUES(?,?,?,?,?,?,?)""",
                   ((ca or "").lower(), (wallet or "").lower(),
                    symbol or "?", float(mcap or 0), float(liq or 0),
                    pair_address or "", now))
+        # last_seen = "terakhir benar-benar terlihat beli" → basis prune rotasi.
+        if wallet:
+            c.execute("UPDATE insider_wallets SET last_seen = ? WHERE address = ?",
+                      (now, str(wallet).strip().lower()))
         c.execute("DELETE FROM insider_buys WHERE ts < ?", (now - 86400,))
 
 

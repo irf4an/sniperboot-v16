@@ -182,6 +182,12 @@ SETTING_DEFAULTS = {
     "sybil_cluster_guard_on":        "1",
     "sybil_cluster_min_wallets":     "7",
     "sybil_cluster_window_sec":      "60",
+    # ---- 🚫 Anti-funder insider (v16.12) ----
+    # Wallet yang terbukti MEMBIAYAI >= N deployer berbeda di operator_funders
+    # bukan trader organik (itu launcher/dev). Sinyal belinya = dev beli koin
+    # sendiri → ditolak saat rekrutmen, dibersihkan dari insider_buys, dan
+    # masuk sybil_blacklist supaya tidak direkrut ulang.
+    "funder_ban_min_deployers":      "3",
     # ---- 🛡️ Clone guard / operator-family guard (v16.6) ----
     # Entry rate-limit per keluarga operator: maks N CA DISTINCT per keluarga
     # dalam jendela H jam. Bukan blacklist token — Pons tipe apa pun tetap
