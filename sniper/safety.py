@@ -88,9 +88,9 @@ def _get_worker(url):
 
 def _get_jina(url):
     import os
-    key = os.getenv("JINA_API_KEY") or (db.get("jina_api_key", str) or "")
+    key = (os.getenv("JINA_API_KEY") or "").strip()
     headers = {"X-Return-Format": "text", "Accept": "application/json"}
-    if key:
+    if key and key != "0":
         headers["Authorization"] = f"Bearer {key}"
     r = _S_PLAIN.get(f"{_JINA}{url}", timeout=25, headers=headers)
     return _parse_json(r)
