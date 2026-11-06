@@ -88,12 +88,24 @@ def _get_worker(url):
 
 def _get_jina(url):
     import os
+    import time as _t
     key = (os.getenv("JINA_API_KEY") or "").strip()
     headers = {"X-Return-Format": "text", "Accept": "application/json"}
     if key and key != "0":
         headers["Authorization"] = f"Bearer {key}"
-    r = _S_PLAIN.get(f"{_JINA}{url}", timeout=25, headers=headers)
-    return _parse_json(r)
+    # Jina free tier kadang 429/503 sesaat → satu retry menutup burst scanner
+    # (2 token dalam detik yang sama). Tanpa retry, satu 429 = koin di-SKIP
+    # fail-closed padahal datanya ada.
+    last = None
+    for attempt in range(2):
+        try:
+            r = _S_PLAIN.get(f"{_JINA}{url}", timeout=25, headers=headers)
+            return _parse_json(r)
+        except Exception as e:
+            last = e
+            if attempt == 0:
+                _t.sleep(1.2)
+    raise last
 
 
 def _get(path, params=None, timeout=10):
@@ -220,7 +232,10 @@ def top_holders_pct(trader, ca: str, exclude: set, n: int = 10) -> float:
     """% supply gabungan n holder teratas, exclude pool/burn/dev sudah dihitung terpisah."""
     try:
         d = _get(f"/tokens/{ca}/holders")
-    except Exception:
+    except Exception as e:
+        # Dulu senyap → log cuma bilang "tidak bisa diverifikasi" tanpa sebab.
+        # Cetak alasannya supaya 429/timeout/unindexed bisa dibedakan.
+        print(f"[safety] ⚠️ holders {ca[:10]}… gagal: {e.__class__.__name__}: {str(e)[:160]}")
         return 0.0  # data holder belum tersedia (token terlalu baru) — jangan blokir
     ts = _total_supply(trader, ca)
     if ts <= 0:
@@ -237,6 +252,12 @@ def top_holders_pct(trader, ca: str, exclude: set, n: int = 10) -> float:
             continue
         if len(vals) >= n:
             break
+    if not vals:
+        # Semua holder teratas = pool/dev/burn yang sudah dikecualikan, ATAU
+        # endpoint masih kosong. Jangan diam-diam dianggap "0% aman".
+        print(f"[safety] ⚠️ holders {ca[:10]}… kosong setelah exclude "
+              f"(items={len(d.get('items') or [])}) → belum terindeks")
+        return 0.0
     return sum(vals) / ts * 100
 
 
