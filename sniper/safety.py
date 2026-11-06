@@ -86,25 +86,41 @@ def _get_worker(url):
     return _parse_json(r)
 
 
+_JINA_MIN_INTERVAL = 1.0      # free tier: ~1 req/detik; burst >20/menit = 429
+_jina_lock = None             # dibuat lazy (threading) supaya import tetap ringan
+_jina_last_call = [0.0]
+
+
 def _get_jina(url):
     import os
+    import threading
     import time as _t
+    global _jina_lock
+    if _jina_lock is None:
+        _jina_lock = threading.Lock()
     key = (os.getenv("JINA_API_KEY") or "").strip()
     headers = {"X-Return-Format": "text", "Accept": "application/json"}
     if key and key != "0":
         headers["Authorization"] = f"Bearer {key}"
-    # Jina free tier kadang 429/503 sesaat → satu retry menutup burst scanner
-    # (2 token dalam detik yang sama). Tanpa retry, satu 429 = koin di-SKIP
+    # Jina free tier membalas 429 kalau dipanggil beruntun (scanner sering
+    # memeriksa 2-3 koin dalam detik yang sama). Serialize + jeda minimum
+    # 1 detik + backoff 3 percobaan, supaya 429 tidak berujung SKIP
     # fail-closed padahal datanya ada.
     last = None
-    for attempt in range(2):
-        try:
-            r = _S_PLAIN.get(f"{_JINA}{url}", timeout=25, headers=headers)
-            return _parse_json(r)
-        except Exception as e:
-            last = e
-            if attempt == 0:
-                _t.sleep(1.2)
+    for attempt in range(3):
+        with _jina_lock:
+            wait = _JINA_MIN_INTERVAL - (_t.time() - _jina_last_call[0])
+            if wait > 0:
+                _t.sleep(wait)
+            try:
+                r = _S_PLAIN.get(f"{_JINA}{url}", timeout=25, headers=headers)
+                return _parse_json(r)
+            except Exception as e:
+                last = e
+            finally:
+                _jina_last_call[0] = _t.time()
+        if attempt < 2:
+            _t.sleep(2.0 * (attempt + 1))
     raise last
 
 
