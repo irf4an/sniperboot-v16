@@ -244,6 +244,68 @@ def dev_pct(trader, ca: str) -> float:
     return bal / ts * 100
 
 
+_TRANSFER_TOPIC = "0x" + Web3.keccak(
+    text="Transfer(address,address,uint256)").hex().removeprefix("0x")
+_ONCHAIN_HOLDERS: dict = {}
+_ONCHAIN_TTL = 120.0
+
+
+def _balances_from_logs(trader, ca: str, chunks: int = 4, span: int = 30000) -> dict:
+    """Rekonstruksi saldo holder dari event Transfer on-chain (RPC murni).
+
+    Dipakai saat Blockscout belum meng-index token baru: endpoint
+    /tokens/{ca}/holders balik kosong walau transaksinya sudah ramai.
+    Return {} kalau riwayatnya tidak lengkap (tidak sampai mint genesis) —
+    lebih baik "tidak tahu" daripada menghitung porsi dari data separuh.
+    """
+    import time as _t
+    key = (ca or "").lower()
+    hit = _ONCHAIN_HOLDERS.get(key)
+    if hit and _t.time() - hit[0] < _ONCHAIN_TTL:
+        return hit[1]
+    w3 = trader.w3
+    addr = Web3.to_checksum_address(ca)
+    head = w3.eth.block_number
+    logs, complete = [], False
+    for i in range(chunks):
+        hi = head - i * span
+        lo = max(0, hi - span + 1)
+        try:
+            part = w3.eth.get_logs({
+                "address": addr, "fromBlock": lo, "toBlock": hi,
+                "topics": [_TRANSFER_TOPIC],
+            })
+        except Exception as e:
+            print(f"[safety] onchain-holders {ca[:10]}… chunk {lo}..{hi} "
+                  f"gagal: {str(e)[:120]}")
+            return {}
+        logs += part
+        zero = "0x" + "0" * 40
+        if any(("0x" + lg["topics"][1].hex()[-40:]) == zero for lg in part):
+            complete = True           # mint genesis ada di jendela ini
+            break
+        if not part:
+            complete = True           # sudah lewat blok deploy
+            break
+    if not complete:
+        print(f"[safety] onchain-holders {ca[:10]}… riwayat belum lengkap "
+              f"({len(logs)} log) → tidak dipakai")
+        return {}
+    bal: dict = {}
+    for lg in logs:
+        try:
+            v = int.from_bytes(lg["data"], "big")
+            frm = "0x" + lg["topics"][1].hex()[-40:]
+            to = "0x" + lg["topics"][2].hex()[-40:]
+        except Exception:
+            continue
+        bal[frm] = bal.get(frm, 0) - v
+        bal[to] = bal.get(to, 0) + v
+    pos = {a: v for a, v in bal.items() if v > 0}
+    _ONCHAIN_HOLDERS[key] = (_t.time(), pos)
+    return pos
+
+
 def top_holders_pct(trader, ca: str, exclude: set, n: int = 10) -> float:
     """% supply gabungan n holder teratas, exclude pool/burn/dev sudah dihitung terpisah."""
     try:
@@ -269,8 +331,18 @@ def top_holders_pct(trader, ca: str, exclude: set, n: int = 10) -> float:
         if len(vals) >= n:
             break
     if not vals:
-        # Semua holder teratas = pool/dev/burn yang sudah dikecualikan, ATAU
-        # endpoint masih kosong. Jangan diam-diam dianggap "0% aman".
+        # Endpoint kosong = token baru belum ke-index Blockscout. Jangan
+        # menyerah: rekonstruksi saldo dari event Transfer di RPC (data
+        # on-chain selalu ada, tidak tergantung indexer).
+        pos = _balances_from_logs(trader, ca)
+        if pos:
+            ranked = sorted(((a, v) for a, v in pos.items() if a not in ex),
+                            key=lambda x: -x[1])[:n]
+            vals = [v for _a, v in ranked]
+            if vals:
+                print(f"[safety] holders {ca[:10]}… kosong di Blockscout → "
+                      f"dipakai saldo on-chain ({len(pos)} holder)")
+    if not vals:
         print(f"[safety] ⚠️ holders {ca[:10]}… kosong setelah exclude "
               f"(items={len(d.get('items') or [])}) → belum terindeks")
         return 0.0
