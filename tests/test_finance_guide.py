@@ -20,9 +20,17 @@ def test_topup_guide_isi_penting():
     t = fg.topup_guide(ADDR, 0.0)
     assert ADDR in t, "alamat wallet harus muncul"
     assert "Arbitrum" in t, "harus menyebut jaringan jembatan"
-    assert "across.to" in t, "harus menyebut bridge"
-    assert "TIDAK punya jaringan" in t, "harus ada peringatan exchange"
+    assert "Binance Web3 Wallet" in t, "harus membedakan exchange vs Web3 wallet"
+    assert "ROUTE A" in t and "ROUTE B" in t, "dua rute harus ada"
     print("PASS topup guide lengkap")
+
+
+def test_cex_guide():
+    t = fg.cex_guide(ADDR)
+    for name in ("Bitrue", "OKX", "Bitget", "KuCoin", "LBank", "Weex"):
+        assert name in t, name
+    assert "Binance Exchange" in t and ADDR in t
+    print("PASS cex guide (6 exchange direct)")
 
 
 def test_withdraw_guide_isi_penting():
@@ -37,6 +45,7 @@ def test_keyword_fallback():
     assert "TARIK" in fg._keyword_answer("gimana withdraw", ADDR, 0.0)
     assert "Bridge" in fg._keyword_answer("mau bridge", ADDR, 0.0)
     assert "0.0123" in fg._keyword_answer("saldo berapa", ADDR, 0.0123)
+    assert "EXCHANGE" in fg._keyword_answer("binance bisa ga", ADDR, 0.0)
     assert fg._keyword_answer("resep nasi goreng", ADDR, 0.0) is None
     print("PASS keyword fallback")
 
@@ -105,6 +114,7 @@ def test_start_guide():
 if __name__ == "__main__":
     test_topup_guide_isi_penting()
     test_withdraw_guide_isi_penting()
+    test_cex_guide()
     test_start_guide()
     test_keyword_fallback()
     test_ask_tanpa_llm()

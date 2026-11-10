@@ -444,7 +444,8 @@ def finance_panel():
         [Button.inline("📥 Top Up", b"fin_topup"),
          Button.inline("📤 Tarik", b"fin_wd")],
         [Button.inline("🌉 Bridge", b"fin_bridge"),
-         Button.inline("⛽ Biaya", b"fin_fee")],
+         Button.inline("🏦 Exchange", b"fin_cex")],
+        [Button.inline("⛽ Biaya", b"fin_fee")],
         [Button.inline("🧭 Mulai dari nol", b"fin_start")],
         [Button.inline("🤖 Tanya AI", b"fin_ask")],
         [Button.inline("👛 Wallet", b"wallet"), Button.inline("« Menu", b"menu")],
@@ -966,7 +967,7 @@ async def _route(event, data):
     elif data == "fin":
         t, b = finance_panel()
         await event.edit(t, buttons=b)
-    elif data in ("fin_topup", "fin_bridge", "fin_fee", "fin_start"):
+    elif data in ("fin_topup", "fin_bridge", "fin_fee", "fin_start", "fin_cex"):
         from . import finance_guide as fg
         bal, gwei, addr = 0.0, None, "—"
         try:
@@ -979,6 +980,8 @@ async def _route(event, data):
             t = fg.topup_guide(addr, bal)
         elif data == "fin_start":
             t = fg.start_guide(addr, bal)
+        elif data == "fin_cex":
+            t = fg.cex_guide(addr)
         elif data == "fin_bridge":
             t = fg._keyword_answer("bridge", addr, bal)
         else:

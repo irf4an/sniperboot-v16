@@ -27,32 +27,82 @@ BRIDGE_URL = "https://across.to"
 WITHDRAW_MAX_ETH = 5.0
 
 
+# Exchange yang sudah punya ETH langsung di jaringan Robinhood Chain.
+# fee/min dalam ETH, data dicek Nov 2026 — tampilkan apa adanya, jangan dibulatkan.
+DIRECT_EXCHANGES = [
+    ("Bitrue", "gratis", "—"),
+    ("OKX", "0.0000014", "0.0002"),
+    ("Bitget", "0.000004", "0.00470521"),
+    ("KuCoin", "0.0002", "0.0004"),
+    ("LBank", "0.0001", "0.0001"),
+    ("Weex", "0.00005", "0.01"),
+]
+
+
 # ---------------------------------------------------------------- panduan
 def topup_guide(wallet_addr: str, bal_eth: float) -> str:
     return (
         "📥 **CARA TOP UP SALDO (Bank → Wallet Bot)**\n\n"
         f"Wallet aktif bot:\n`{wallet_addr}`\n"
         f"Saldo sekarang: **{bal_eth:.6f} ETH**\n"
-        f"Jaringan: **{CHAIN_NAME}** (chain {CHAIN_ID}) — bukan Ethereum/ERC20.\n\n"
-        "**PENTING:** bank & exchange (Tokocrypto/Binance) TIDAK punya jaringan "
-        f"{CHAIN_NAME}. Jangan transfer langsung ke alamat di atas dari exchange, "
-        "dananya nyangkut di jaringan lain.\n\n"
-        "**Alur 4 langkah:**\n"
-        "1️⃣ **Bank → Exchange**\n"
-        "   Deposit Rupiah (VA BCA / QRIS) di Tokocrypto atau Binance, lalu beli ETH.\n"
-        "2️⃣ **Exchange → MetaMask**\n"
-        "   Withdraw ETH, pilih jaringan **Arbitrum One** (fee ±Rp3–8rb). "
-        "Jangan pilih Ethereum/ERC20 (gas $5–10).\n"
-        "3️⃣ **MetaMask → Robinhood Chain**\n"
-        f"   Buka {BRIDGE_URL} → Connect Wallet → "
-        f"From **Arbitrum**, To **{CHAIN_NAME}**, asset ETH.\n"
-        "   Isi kolom *recipient* dengan alamat wallet bot di atas, supaya "
-        "dananya langsung mendarat di bot (tidak perlu kirim dua kali).\n"
-        "4️⃣ **Verifikasi**\n"
-        "   Tunggu 1–2 menit, lalu tap 🔄 Refresh di panel Wallet. "
-        "Saldo on-chain akan muncul otomatis.\n\n"
-        "_Tips: tes dengan nominal kecil dulu (±$5) sebelum nominal besar._"
+        f"Jaringan: **{CHAIN_NAME}** (chain {CHAIN_ID}).\n\n"
+        "**Alamat 0x ini sama di semua jaringan EVM, tapi saldonya terpisah "
+        "per jaringan.** ETH yang masih di Ethereum/BSC/Arbitrum TIDAK bisa "
+        "dipakai bot sampai benar-benar berada di Robinhood Chain.\n\n"
+        "**ROUTE A — lewat Binance (2 langkah on-chain)**\n"
+        "1️⃣ BCA → Binance: Deposit IDR via VA BCA (gratis, 1–5 menit).\n"
+        "2️⃣ Beli **ETH** di Spot (fee trading 0,1%).\n"
+        "3️⃣ Withdraw ETH → jaringan **Arbitrum One** → alamat di atas.\n"
+        "   Fee 0,00005 ETH, min 0,0003 ETH, ±2–5 menit.\n"
+        "4️⃣ Buka **Binance → Wallets → Web3**, ganti jaringan ke **Arbitrum**. "
+        "Saldo muncul di alamat yang sama.\n"
+        "5️⃣ Di Web3 Wallet: **Trade → Bridge**, dari ETH **Arbitrum** ke ETH "
+        f"**{CHAIN_NAME}**, recipient alamat di atas. ±1–2 menit, fee "
+        "±$0,10–0,50.\n\n"
+        "**ROUTE B — exchange yang sudah support Robinhood Chain (1 langkah)**\n"
+        "Withdraw ETH langsung pilih jaringan **Robinhood Chain** → alamat di "
+        "atas. Tidak perlu bridge.\n"
+        "• Bitrue — gratis\n"
+        "• OKX — 0,0000014 ETH (min 0,0002)\n"
+        "• Bitget — 0,000004 ETH\n"
+        "• KuCoin — 0,0002 ETH\n"
+        "• LBank — 0,0001 ETH\n"
+        "• Weex — 0,00005 ETH\n\n"
+        "**Binance Exchange belum punya ETH di jaringan Robinhood** — yang "
+        "support jaringan ini di aplikasi Binance adalah **Binance Web3 Wallet** "
+        "(wallet self-custody), bukan menu withdraw exchange.\n\n"
+        "✅ **Verifikasi:** tap 🔄 Refresh di panel Wallet. Bot membaca "
+        f"`rpc.mainnet.chain.robinhood.com`; saldo muncul otomatis setelah "
+        "blok konfirmasi.\n\n"
+        "_Tes Rp100–200 ribu dulu. Jangan pilih jaringan Ethereum/ERC20 atau "
+        "BSC — dananya masuk ledger lain dan bot tidak bisa memakainya._"
     )
+
+
+def cex_guide(wallet_addr: str) -> str:
+    """Tabel exchange yang bisa kirim ETH langsung ke Robinhood Chain."""
+    lines = [
+        "🏦 **EXCHANGE YANG BISA KIRIM ETH LANGSUNG KE ROBINHOOD CHAIN**\n",
+        f"Tujuan: `{wallet_addr}`\n",
+        "Pilih jaringan **Robinhood Chain** saat withdraw. Selesai — tanpa bridge.\n",
+    ]
+    for name, fee, minw in DIRECT_EXCHANGES:
+        min_txt = f"min {minw} ETH" if minw != "—" else "tanpa minimum"
+        fee_txt = "gratis" if fee == "gratis" else f"fee {fee} ETH"
+        lines.append(f"• **{name}** — {fee_txt}, {min_txt}")
+    lines += [
+        "",
+        "**Binance Exchange: belum ada ETH di jaringan ini.** "
+        "Di aplikasi Binance yang support Robinhood Chain adalah "
+        "**Binance Web3 Wallet** (self-custody). Kalau ETH lu di Binance "
+        "Exchange, pakai Route A: withdraw ke **Arbitrum One** → bridge di "
+        "Web3 Wallet.",
+        "",
+        "_Fee bisa berubah. Cek ulang di halaman withdraw exchange sebelum "
+        "konfirmasi._",
+    ]
+    return "\n".join(lines)
+
 
 
 def start_guide(wallet_addr: str, bal_eth: float) -> str:
@@ -233,6 +283,9 @@ def _keyword_answer(q: str, wallet_addr: str, bal_eth: float) -> str | None:
         return topup_guide(wallet_addr, bal_eth)
     if any(k in t for k in ("tarik", "withdraw", "cair", "wd")):
         return withdraw_guide(wallet_addr, bal_eth)
+    if any(k in t for k in ("exchange", "binance", "okx", "bitget", "kucoin",
+                            "lbank", "bitrue", "weex", "tokocrypto")):
+        return cex_guide(wallet_addr)
     if any(k in t for k in ("bridge", "jembatan", "across")):
         return (
             f"🌉 **Bridge ke {CHAIN_NAME}**\n\n"
