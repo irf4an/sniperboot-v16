@@ -10,6 +10,7 @@ from telethon import events, Button, utils
 from . import config, db, engine, agent, fmt
 
 _pending = {}  # admin_id -> action string ("add_source" | "set:key" | "insaddr")
+_wd_plan = {}  # admin_id -> {"dest": alamat, "amount": str} untuk konfirmasi tarik
 _trader = None
 _user = None  # userbot Telethon (buat resolve channel publik via get_entity)
 _bot = None  # bot Telethon client (buat scheduling auto-dismiss proposal)
@@ -145,7 +146,8 @@ def main_menu_buttons():
         [Button.inline("📊 Posisi", b"positions"), Button.inline("📡 Sources", b"sources")],
         [Button.inline("⚙️ Settings", b"settings"), Button.inline("📈 Stats", b"stats")],
         [Button.inline("🧠 Otak", b"agent"), pause_btn],
-        [Button.inline("👛 Wallet", b"wallet"), Button.inline("🔄 Refresh", b"menu")],
+        [Button.inline("👛 Wallet", b"wallet"), Button.inline("💸 Dana", b"fin")],
+        [Button.inline("🔄 Refresh", b"menu")],
     ]
 
 
@@ -391,7 +393,9 @@ def wallet_panel():
         row.append(Button.inline("🔑 Key", f"wkey:{w['id']}"))
         row.append(Button.inline("🗑", f"wdel:{w['id']}"))
         buttons.append(row)
+        buttons.append([Button.inline("📖 Panduan Top Up / Tarik", f"wguide:{w['id']}")])
     buttons.append([Button.inline("➕ Generate", b"wgen"), Button.inline("📥 Import", b"wimport")])
+    buttons.append([Button.inline("💸 Panel Dana", b"fin")])
     buttons.append([Button.inline("🔄 Reset Saldo", b"paper_reset"),
                     Button.inline("➕ Tambah $50", b"paper_add_50")])
     buttons.append([Button.inline("« Menu", b"menu")])
@@ -402,6 +406,49 @@ def wallet_panel():
         "",
     ]
     lines = ["\n".join(wallet_lines), "\n".join(lines)]
+    return "\n".join(lines), buttons
+
+
+def finance_panel():
+    """💸 Panel Dana — top up / tarik saldo + panduan AI."""
+    bal = 0.0
+    addr = "—"
+    gwei = None
+    try:
+        bal = _trader.eth_balance()
+        addr = _trader.addr
+        gwei = _trader.w3.eth.gas_price / 1e9
+    except Exception:
+        pass
+    mode = "🔴 LIVE (dana nyata)" if db.get("agent_dry_run", str) == "0" \
+        else "🧪 LATIHAN (simulasi)"
+    lines = [
+        "💸 **Dana — Top Up & Tarik**",
+        "",
+        f"Mode: **{mode}**",
+        f"👛 Wallet aktif:\n`{addr}`",
+        f"⛽ Saldo on-chain: **{bal:.6f} ETH**",
+    ]
+    if gwei:
+        lines.append(f"⛽ Gas: {gwei:.2f} gwei")
+    lines += [
+        "",
+        "**📥 Top Up** — dari bank/exchange ke wallet bot.",
+        "**📤 Tarik** — dari wallet bot ke wallet pribadi lu.",
+        "**🤖 Tanya AI** — tanya bebas soal dana (misal: \"cara tarik ke BCA\").",
+        "",
+        "_Semua penarikan selalu minta konfirmasi dulu — tidak ada transfer "
+        "otomatis tanpa persetujuan._",
+    ]
+    buttons = [
+        [Button.inline("📥 Top Up", b"fin_topup"),
+         Button.inline("📤 Tarik", b"fin_wd")],
+        [Button.inline("🌉 Bridge", b"fin_bridge"),
+         Button.inline("⛽ Biaya", b"fin_fee")],
+        [Button.inline("🧭 Mulai dari nol", b"fin_start")],
+        [Button.inline("🤖 Tanya AI", b"fin_ask")],
+        [Button.inline("👛 Wallet", b"wallet"), Button.inline("« Menu", b"menu")],
+    ]
     return "\n".join(lines), buttons
 
 
@@ -645,6 +692,47 @@ def register(bot, trader, user_client=None):
                 + "\n\n_hapus pesan key-mu di atas biar aman._")
             t, b = wallet_panel()
             await event.respond(t, buttons=b)
+        elif action == "fin_ask":
+            from . import finance_guide as fg
+            bal, gwei, addr = 0.0, None, "—"
+            try:
+                bal = _trader.eth_balance()
+                addr = _trader.addr
+                gwei = _trader.w3.eth.gas_price / 1e9
+            except Exception:
+                pass
+            q = event.raw_text.strip()
+            ans = await asyncio.to_thread(
+                fg.ask, q, addr, bal, gwei, agent._call)
+            await event.respond(ans, buttons=[
+                [Button.inline("« Dana", b"fin")]])
+        elif action == "fin_wd_input":
+            from . import finance_guide as fg
+            parts = event.raw_text.strip().split()
+            if len(parts) != 2:
+                _pending[event.sender_id] = "fin_wd_input"
+                return await event.respond(
+                    "❌ Format: `<alamat> <jumlah_eth>`\nContoh: `0x1234…abcd 0.02`")
+            dest, amount = parts[0], parts[1]
+            plan = await asyncio.to_thread(
+                fg.withdraw_preview, _trader, dest, amount)
+            if not plan.get("ok"):
+                _pending[event.sender_id] = "fin_wd_input"
+                return await event.respond(f"❌ {plan.get('error')}")
+            _wd_plan[event.sender_id] = {
+                "dest": dest, "amount": amount, "preview": plan}
+            await event.respond(
+                "🔎 **Konfirmasi penarikan**\n\n"
+                f"Dari: `{plan['from']}`\n"
+                f"Ke: `{plan['to']}`\n"
+                f"Jumlah: **{plan['amount_eth']:.6f} ETH**\n"
+                f"Gas: ±{plan['gas_eth']:.6f} ETH ({plan['gwei']:.2f} gwei)\n"
+                f"Sisa setelah kirim: **{plan['left_eth']:.6f} ETH**\n\n"
+                "Kirim uangnya sekarang?",
+                buttons=[
+                    [Button.inline("✅ Ya, kirim", b"fin_wd_ok"),
+                     Button.inline("❌ Batal", b"fin_wd_cancel")],
+                ])
         elif action == "agentset:agent_model":
             db.set_("agent_model", event.raw_text.strip())
             await event.respond(f"✅ model → `{event.raw_text.strip()}`")
@@ -775,6 +863,27 @@ async def _route(event, data):
     elif data == "wallet":
         t, b = wallet_panel()
         await event.edit(t, buttons=b)
+    elif data.startswith("wguide:"):
+        from . import finance_guide as fg
+        w = db.get_wallet(int(data[7:]))
+        if not w:
+            return await event.answer("wallet tidak ada", alert=True)
+        bal, gwei = 0.0, None
+        try:
+            w3 = _trader.w3
+            bal = w3.eth.get_balance(w["address"]) / 1e18
+            gwei = w3.eth.gas_price / 1e9
+        except Exception:
+            pass
+        t = "\n\n".join([
+            f"📖 **Panduan lengkap — {w['name']}**",
+            fg.topup_guide(w["address"], bal),
+            fg.withdraw_guide(w["address"], bal, gwei),
+        ])
+        await event.edit(t, buttons=[
+            [Button.inline("📤 Tarik dari wallet ini", f"fin_wd")],
+            [Button.inline("« Wallet", b"wallet")],
+        ])
     elif data in ("paper_reset", "paper_reset_100"):
         _pending[event.sender_id] = "paper_reset"
         await event.respond(
@@ -796,7 +905,7 @@ async def _route(event, data):
         pk = pk if pk.startswith("0x") else "0x" + pk
         first = db.wallet_count() == 0
         name = f"Wallet {db.wallet_count() + 1}"
-        db.add_wallet(name, acct.address, pk, make_active=first)
+        wid = db.add_wallet(name, acct.address, pk, make_active=first)
         if first:
             try:
                 _trader.use_wallet(pk)
@@ -809,7 +918,8 @@ async def _route(event, data):
             f"🔑 **PRIVATE KEY — backup SEKARANG, lalu hapus pesan ini:**\n`{pk}`\n\n"
             f"⚠️ Siapa pun yang pegang key ini bisa nguras wallet. Simpan offline, "
             f"jangan share. Ini hot wallet di server — isi secukupnya (burner).{enc_note}"
-            + ("\n\n✅ Diset jadi **wallet aktif** (dipakai buat beli)." if first else ""))
+            + ("\n\n✅ Diset jadi **wallet aktif** (dipakai buat beli)." if first else ""),
+            buttons=[[Button.inline("📖 Panduan Top Up / Tarik", f"wguide:{wid}")]])
         t, b = wallet_panel()
         await event.respond(t, buttons=b)
     elif data == "wimport":
@@ -853,6 +963,83 @@ async def _route(event, data):
             await event.edit(t, buttons=b)
         except Exception:
             pass
+    elif data == "fin":
+        t, b = finance_panel()
+        await event.edit(t, buttons=b)
+    elif data in ("fin_topup", "fin_bridge", "fin_fee", "fin_start"):
+        from . import finance_guide as fg
+        bal, gwei, addr = 0.0, None, "—"
+        try:
+            bal = _trader.eth_balance()
+            addr = _trader.addr
+            gwei = _trader.w3.eth.gas_price / 1e9
+        except Exception:
+            pass
+        if data == "fin_topup":
+            t = fg.topup_guide(addr, bal)
+        elif data == "fin_start":
+            t = fg.start_guide(addr, bal)
+        elif data == "fin_bridge":
+            t = fg._keyword_answer("bridge", addr, bal)
+        else:
+            t = fg._keyword_answer("gas fee", addr, bal)
+        await event.edit(t, buttons=[
+            [Button.inline("🤖 Tanya AI", b"fin_ask")],
+            [Button.inline("« Dana", b"fin")],
+        ])
+    elif data == "fin_ask":
+        _pending[event.sender_id] = "fin_ask"
+        await event.respond(
+            "🤖 **Tanya soal dana**\n\n"
+            "Contoh:\n"
+            "• `cara tarik ke BCA`\n"
+            "• `top up dari tokocrypto`\n"
+            "• `butuh berapa gas`\n"
+            "• `saldo sekarang berapa`")
+    elif data == "fin_wd":
+        _pending[event.sender_id] = "fin_wd_input"
+        bal = 0.0
+        try:
+            bal = _trader.eth_balance()
+        except Exception:
+            pass
+        await event.respond(
+            "📤 **Tarik saldo**\n\n"
+            f"Saldo tersedia: **{bal:.6f} ETH**\n\n"
+            "Kirim dalam satu baris:\n"
+            "`<alamat_tujuan> <jumlah_eth>`\n\n"
+            "Contoh:\n"
+            "`0x1234...abcd 0.02`\n"
+            f"`0x1234...abcd all`  (semua dikurangi gas)\n\n"
+            "_Alamat tujuan harus wallet di jaringan Robinhood Chain "
+            "(misal MetaMask lu yang sudah di-set ke chain ini)._")
+    elif data == "fin_wd_ok":
+        plan = _wd_plan.pop(event.sender_id, None)
+        if not plan:
+            return await event.answer("Sesi tarik sudah kedaluwarsa, ulangi.", alert=True)
+        from . import finance_guide as fg
+        await event.answer("mengirim…")
+        res = await asyncio.to_thread(
+            fg.withdraw_execute, _trader, plan["dest"], plan["amount"],
+            plan.get("preview"))
+        if res.get("ok"):
+            await event.edit(
+                f"✅ **ETH terkirim**\n\n"
+                f"Jumlah: **{res['amount_eth']:.6f} ETH**\n"
+                f"Tujuan: `{res['to']}`\n"
+                f"Blok: {res.get('block')}\n\n"
+                f"[Lihat di Blockscout]({res['explorer']})\n\n"
+                f"_Langkah berikut: bridge ke Arbitrum lewat across.to, "
+                f"lalu withdraw ke exchange._",
+                buttons=[[Button.inline("« Dana", b"fin")]])
+        else:
+            await event.edit(
+                f"❌ **Gagal kirim**\n\n{res.get('error')}",
+                buttons=[[Button.inline("« Dana", b"fin")]])
+    elif data == "fin_wd_cancel":
+        _wd_plan.pop(event.sender_id, None)
+        t, b = finance_panel()
+        await event.edit(f"❌ Dibatalkan.\n\n{t}", buttons=b)
     elif data == "pause":
         db.set_("paused", "0" if db.paused() else "1")
         await event.answer("⏸ paused" if db.paused() else "▶️ resumed")
