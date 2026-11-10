@@ -183,23 +183,31 @@ async def positions_panel():
 def sources_panel():
     rows = db.sources()
     lines, buttons = ["📡 **Sources**\n"], []
-    if db.get("userbot_enabled", str) == "1":
-        # Userbot aktif → source mirror grup relevan, tampilkan daftarnya.
-        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v4) + Insider Tracker (55 Wallets)")
+    ub_on = db.get("userbot_enabled", str) == "1"
+    lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v4) + Insider Tracker")
+    if ub_on:
         lines.append("📡 Userbot Telegram: **AKTIF** (mirror sinyal grup di bawah)\n")
-        for s in rows:
-            st = "✅" if s["enabled"] else "🚫"
-            tp = f" · topic {s['topic_id']}" if s["topic_id"] else " · semua topic"
-            lines.append(f"{st} **{s['name']}** — mcap ≤ ${s['mcap_max']:,.0f}\n   `{s['chat_id']}`{tp}")
-            buttons.append([
-                Button.inline(f"{'🚫 Off' if s['enabled'] else '✅ On'} {s['name'][:14]}", f"srct:{s['id']}"),
-                Button.inline("🗑", f"srcd:{s['id']}"),
-            ])
     else:
-        # Default v16.6: userbot non-aktif — tanpa daftar source mirror.
-        lines.append("📡 **Sinyal Aktif**: On-Chain Scanner (Uniswap v4) + Insider Tracker (55 Wallets)")
-        lines.append("🔒 Userbot Telegram: **NON-AKTIF** (Akun personal aman & bebas risiko ban)")
-        lines.append("_Tambah/buka source mirror: aktifkan dulu setting 'userbot_enabled'_\n")
+        lines.append("🔒 Userbot Telegram: **NON-AKTIF** (akun personal aman & bebas risiko ban)")
+        lines.append("_Source bisa ditambah/diatur sekarang; sinyalnya baru dibaca "
+                     "setelah `userbot_enabled=1` + bot di-restart._\n")
+
+    if not rows:
+        lines.append("_Belum ada source grup. Tap ➕ Tambah Source di bawah._")
+    for s in rows:
+        st = "✅" if s["enabled"] else "🚫"
+        tp = f" · topic {s['topic_id']}" if s["topic_id"] else " · semua topic"
+        dim = "" if ub_on else " _(belum aktif)_"
+        lines.append(f"{st} **{s['name']}** — mcap ≤ ${s['mcap_max']:,.0f}{dim}\n"
+                     f"   `{s['chat_id']}`{tp}")
+        buttons.append([
+            Button.inline(f"{'🚫 Off' if s['enabled'] else '✅ On'} {s['name'][:14]}", f"srct:{s['id']}"),
+            Button.inline("🗑", f"srcd:{s['id']}"),
+        ])
+
+    buttons.insert(0, [Button.inline("➕ Tambah Source", b"srcadd")])
+    if not ub_on:
+        buttons.append([Button.inline("🔓 Aktifkan Userbot", b"ubon")])
     insiders = db.list_insiders(only_enabled=True)
     buttons.append([Button.inline("🕵️ Insider", b"ins:0"),
                     Button.inline("🔥 Log Beli Insider", b"insbuys:3600")])
@@ -1065,17 +1073,30 @@ async def _route(event, data):
         _pending[event.sender_id] = "add_source"
         await event.respond(
             "➕ **Tambah source** — kirim 1 baris:\n\n"
-            "`<target> <mcap_max> <nama>`\n\n"
+            "`<target> <mcap_max> <nama>`\n"
+            "atau singkat: `<target> <nama>` (mcap default $30.000)\n\n"
             "**Channel PUBLIK** (auto-resolve):\n"
             "`@degencalls 30000 Degen Public`\n"
-            "`https://t.me/degencalls 30000 Degen Public`\n\n"
+            "`https://t.me/degencalls Degen Public`\n\n"
             "**Channel/Grup PRIVATE** (harus sudah join):\n"
             "`-1001234567890 15000 Alpha Private` _(chat_id)_\n"
             "`https://t.me/c/2103131992/250551 30000 Degen Hood` _(link + topic)_\n\n"
-            "⚠️ Akun Telegram Kakak WAJIB sudah join channel-nya dulu "
+            "⚠️ Akun Telegram WAJIB sudah join channel-nya dulu "
             "(publik maupun private), baru bisa dipantau.\n"
             "💡 Gak tau chat_id private-nya? Ketik /id lalu forward 1 pesan dari channel itu."
         )
+    elif data == "ubon":
+        db.set_("userbot_enabled", "1")
+        await event.edit(
+            "🔓 **userbot_enabled = 1**\n\n"
+            "Source group sekarang akan dibaca — tapi userbot hanya start saat "
+            "bot boot. **Restart bot sekarang** dari terminal VPS:\n\n"
+            "`pm2 restart hoodsniper-v16`\n\n"
+            "Setelah restart, cek log: harus muncul "
+            "`[userbot] aktif` dan source grup mulai dipantau.\n\n"
+            "_Kalau akun belum pernah login, jalankan `python3 bot.py login` "
+            "sekali untuk membuat session file._",
+            buttons=[[Button.inline("« Sources", b"sources")]])
     elif data.startswith("ins:"):
         # 🕵️ Insider — buka layar yang ada di dalam 📡 Sources
         try:
@@ -1230,13 +1251,21 @@ async def _resolve_target(target: str):
 
 async def _do_add_source(event):
     parts = event.raw_text.strip().split(maxsplit=2)
-    if len(parts) < 3:
-        return await event.respond("❌ Format: `<target> <mcap_max> <nama>`")
-    target, mcap_s, name = parts
-    try:
-        mcap = float(mcap_s)
-    except ValueError:
-        return await event.respond("❌ mcap_max harus angka.")
+    if not parts:
+        return await event.respond("❌ Format: `<target> [mcap_max] [nama]`")
+    target = parts[0]
+    mcap = float(db.get("src_default_mcap", float) or 30000.0)
+    name = target[:24]
+    if len(parts) >= 2:
+        try:
+            mcap = float(parts[1])
+            if len(parts) >= 3:
+                name = parts[2].strip() or name
+        except ValueError:
+            # argumen kedua bukan angka → anggap nama, mcap pakai default
+            name = " ".join(parts[1:]).strip() or name
+    if mcap <= 0:
+        return await event.respond("❌ mcap_max harus angka > 0.")
     try:
         chat_id, topic = await _resolve_target(target)
     except ValueError as e:
