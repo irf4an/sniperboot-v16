@@ -250,19 +250,22 @@ _ONCHAIN_HOLDERS: dict = {}
 _ONCHAIN_TTL = 120.0
 
 
-def _balances_from_logs(trader, ca: str, chunks: int = 4, span: int = 30000) -> dict:
-    """Rekonstruksi saldo holder dari event Transfer on-chain (RPC murni).
+_TX_LOGS: dict = {}          # ca -> (ts, logs, complete)
+_TX_LOGS_TTL = 120.0         # detik; dipakai bersama oleh holder & padding
 
-    Dipakai saat Blockscout belum meng-index token baru: endpoint
-    /tokens/{ca}/holders balik kosong walau transaksinya sudah ramai.
-    Return {} kalau riwayatnya tidak lengkap (tidak sampai mint genesis) —
-    lebih baik "tidak tahu" daripada menghitung porsi dari data separuh.
+
+def _transfer_logs(trader, ca: str, chunks: int = 4, span: int = 30000):
+    """Ambil seluruh event Transfer sejak mint (mundur per `span` blok).
+
+    Return (logs, complete). `complete=False` artinya jendela mundur habis
+    sebelum ketemu mint genesis → data tidak boleh dipakai untuk persentase.
+    Di-cache 120 s supaya holder-check dan padding-check tidak menembak RPC 2x.
     """
     import time as _t
     key = (ca or "").lower()
-    hit = _ONCHAIN_HOLDERS.get(key)
-    if hit and _t.time() - hit[0] < _ONCHAIN_TTL:
-        return hit[1]
+    hit = _TX_LOGS.get(key)
+    if hit and _t.time() - hit[0] < _TX_LOGS_TTL:
+        return hit[1], hit[2]
     w3 = trader.w3
     addr = Web3.to_checksum_address(ca)
     head = w3.eth.block_number
@@ -276,20 +279,39 @@ def _balances_from_logs(trader, ca: str, chunks: int = 4, span: int = 30000) -> 
                 "topics": [_TRANSFER_TOPIC],
             })
         except Exception as e:
-            print(f"[safety] onchain-holders {ca[:10]}… chunk {lo}..{hi} "
+            print(f"[safety] transfer-logs {ca[:10]}… chunk {lo}..{hi} "
                   f"gagal: {str(e)[:120]}")
-            return {}
+            return [], False
         logs += part
         zero = "0x" + "0" * 40
-        if any(("0x" + lg["topics"][1].hex()[-40:]) == zero for lg in part):
+        if any((("0x" + lg["topics"][1].hex()[-40:]) == zero) for lg in part):
             complete = True           # mint genesis ada di jendela ini
             break
         if not part:
             complete = True           # sudah lewat blok deploy
             break
     if not complete:
-        print(f"[safety] onchain-holders {ca[:10]}… riwayat belum lengkap "
+        print(f"[safety] transfer-logs {ca[:10]}… riwayat belum lengkap "
               f"({len(logs)} log) → tidak dipakai")
+    _TX_LOGS[key] = (_t.time(), logs, complete)
+    return logs, complete
+
+
+def _balances_from_logs(trader, ca: str, chunks: int = 4, span: int = 30000) -> dict:
+    """Rekonstruksi saldo holder dari event Transfer on-chain (RPC murni).
+
+    Dipakai saat Blockscout belum meng-index token baru: endpoint
+    /tokens/{ca}/holders balik kosong walau transaksinya sudah ramai.
+    Return {} kalau riwayatnya tidak lengkap (tidak sampai mint genesis) —
+    lebih baik "tidak tahu" daripada menghitung porsi dari data separuh.
+    """
+    import time as _t
+    key = (ca or "").lower()
+    hit = _ONCHAIN_HOLDERS.get(key)
+    if hit and _t.time() - hit[0] < _ONCHAIN_TTL:
+        return hit[1]
+    logs, complete = _transfer_logs(trader, ca, chunks=chunks, span=span)
+    if not complete:
         return {}
     bal: dict = {}
     for lg in logs:
@@ -304,6 +326,58 @@ def _balances_from_logs(trader, ca: str, chunks: int = 4, span: int = 30000) -> 
     pos = {a: v for a, v in bal.items() if v > 0}
     _ONCHAIN_HOLDERS[key] = (_t.time(), pos)
     return pos
+
+
+def _padding_from_logs(logs, supply: int, window_blocks: int = 3) -> dict | None:
+    """Deteksi holder padding: SATU pengirim menyebar token ke banyak dompet
+    di blok-blok pertama, dan dompet-dompet itu masih memegang supply besar.
+
+    Return {"sender", "wallets", "share_pct"} atau None kalau tidak cukup data.
+    Murni komputasi dari log — dipisah supaya bisa diuji tanpa RPC.
+    """
+    if not logs or supply <= 0:
+        return None
+    try:
+        first = min(lg["blockNumber"] for lg in logs)
+    except Exception:
+        return None
+    win = first + max(0, int(window_blocks))
+    zero = "0x" + "0" * 40
+
+    senders: dict = {}
+    bal: dict = {}
+    for lg in logs:
+        try:
+            v = int.from_bytes(lg["data"], "big")
+            frm = "0x" + lg["topics"][1].hex()[-40:]
+            to = "0x" + lg["topics"][2].hex()[-40:]
+        except Exception:
+            continue
+        bal[frm] = bal.get(frm, 0) - v
+        bal[to] = bal.get(to, 0) + v
+        if lg["blockNumber"] <= win and to != zero and frm != zero:
+            senders.setdefault(frm, set()).add(to)
+
+    if not senders:
+        return None
+    sender, recips = max(senders.items(), key=lambda kv: len(kv[1]))
+    held = sum(max(0, bal.get(a, 0)) for a in recips)
+    return {"sender": sender, "wallets": len(recips),
+            "share_pct": held / supply * 100.0,
+            "first_block": first}
+
+
+def launch_padding(trader, ca: str) -> dict | None:
+    """Versi RPC dari `_padding_from_logs` (butuh mint genesis lengkap)."""
+    logs, complete = _transfer_logs(trader, ca)
+    if not complete or not logs:
+        return None
+    try:
+        supply = _total_supply(trader, ca)
+    except Exception:
+        return None
+    win = int(db.get("pad_window_blocks") or 3)
+    return _padding_from_logs(logs, supply, window_blocks=win)
 
 
 def top_holders_pct(trader, ca: str, exclude: set, n: int = 10) -> float:
@@ -513,6 +587,30 @@ def check(trader, ca: str, pair) -> tuple[bool, str]:
         tp, top_failed = -1.0, True
     if not top_failed and tp > max_top:
         return False, f"top10 holders pegang {tp:.1f}% (max {max_top:.0f}%)"
+
+    # ---- 🧩 launch padding (holder padding / hidden concentration) ----
+    # Satu alamat menyebar token ke ratusan dompet di blok-blok pertama, lalu
+    # dompet-dompet itu menahan supply. Efeknya: top10% terlihat kecil walau
+    # satu pihak menguasai hampir seluruh supply.
+    # Default MATI (pad_min_wallets=0). `pad_measure_on=1` = hanya mencatat.
+    pad_on = int(db.get("pad_min_wallets") or 0)
+    pad_measure = db.get("pad_measure_on", str) == "1"
+    if pad_on > 0 or pad_measure:
+        try:
+            pad = launch_padding(trader, ca)
+        except Exception as e:
+            pad = None
+            print(f"[safety] ⚠️ padding check gagal (fail-open): "
+                  f"{e.__class__.__name__}: {e}")
+        if pad:
+            print(f"[safety] padding {ca[:10]}… sender {pad['sender'][:10]}… → "
+                  f"{pad['wallets']} dompet, {pad['share_pct']:.1f}% supply")
+            if pad_on > 0:
+                max_share = float(db.get("pad_max_supply_pct") or 60.0)
+                if pad["wallets"] >= pad_on and pad["share_pct"] >= max_share:
+                    return False, (f"launch padding: 1 alamat sebar ke "
+                                   f"{pad['wallets']} dompet, pegang "
+                                   f"{pad['share_pct']:.0f}% supply")
 
     # ---- kebijakan saat verifikasi gagal ----
     if dev_failed or top_failed:
