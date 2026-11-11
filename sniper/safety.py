@@ -254,11 +254,12 @@ _TX_LOGS: dict = {}          # ca -> (ts, logs, complete)
 _TX_LOGS_TTL = 120.0         # detik; dipakai bersama oleh holder & padding
 
 
-def _transfer_logs(trader, ca: str, chunks: int = 4, span: int = 30000):
+def _transfer_logs(trader, ca: str, chunks: int = 8, span: int = 10000):
     """Ambil seluruh event Transfer sejak mint (mundur per `span` blok).
 
-    Return (logs, complete). `complete=False` artinya jendela mundur habis
-    sebelum ketemu mint genesis → data tidak boleh dipakai untuk persentase.
+    Return (logs, complete). `complete=True` HANYA kalau event mint (from=0x0)
+    benar-benar ditemukan. Chunk kosong tidak dianggap bukti riwayat lengkap —
+    beberapa RPC membalas [] untuk rentang blok yang terlalu besar.
     Di-cache 120 s supaya holder-check dan padding-check tidak menembak RPC 2x.
     """
     import time as _t
@@ -269,6 +270,7 @@ def _transfer_logs(trader, ca: str, chunks: int = 4, span: int = 30000):
     w3 = trader.w3
     addr = Web3.to_checksum_address(ca)
     head = w3.eth.block_number
+    zero = "0x" + "0" * 40
     logs, complete = [], False
     for i in range(chunks):
         hi = head - i * span
@@ -283,21 +285,19 @@ def _transfer_logs(trader, ca: str, chunks: int = 4, span: int = 30000):
                   f"gagal: {str(e)[:120]}")
             return [], False
         logs += part
-        zero = "0x" + "0" * 40
         if any((("0x" + lg["topics"][1].hex()[-40:]) == zero) for lg in part):
             complete = True           # mint genesis ada di jendela ini
             break
-        if not part:
-            complete = True           # sudah lewat blok deploy
-            break
+        if lo == 0:
+            break                     # mentok ke blok 0 tanpa mint → incomplete
     if not complete:
         print(f"[safety] transfer-logs {ca[:10]}… riwayat belum lengkap "
-              f"({len(logs)} log) → tidak dipakai")
+              f"({chunks}x{span} blok, {len(logs)} log) → tidak dipakai")
     _TX_LOGS[key] = (_t.time(), logs, complete)
     return logs, complete
 
 
-def _balances_from_logs(trader, ca: str, chunks: int = 4, span: int = 30000) -> dict:
+def _balances_from_logs(trader, ca: str, chunks: int = 8, span: int = 10000) -> dict:
     """Rekonstruksi saldo holder dari event Transfer on-chain (RPC murni).
 
     Dipakai saat Blockscout belum meng-index token baru: endpoint

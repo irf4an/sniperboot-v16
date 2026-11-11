@@ -87,10 +87,31 @@ def test_default_config_mati():
     print("PASS default filter mati + label tersedia")
 
 
+def test_chunk_kosong_bukan_riwayat_lengkap():
+    """RPC bisa balas [] untuk rentang besar — itu BUKAN bukti sampai mint."""
+    class _Eth:
+        block_number = 1_000_000
+
+        def get_logs(self, q):
+            return []
+
+    class _W3:
+        eth = _Eth()
+
+    class _Trader:
+        w3 = _W3()
+
+    safety._TX_LOGS.clear()
+    logs, complete = safety._transfer_logs(_Trader(), "0x" + "33" * 20, chunks=3, span=1000)
+    assert logs == [] and complete is False, (logs, complete)
+    print("PASS chunk kosong tidak dianggap lengkap")
+
+
 if __name__ == "__main__":
     test_deteksi_padding_satu_pengirim()
     test_bukan_padding_kalau_penerima_sedikit()
     test_transfer_setelah_window_tidak_dihitung()
     test_log_kosong_atau_supply_nol()
     test_default_config_mati()
+    test_chunk_kosong_bukan_riwayat_lengkap()
     print("\n✅ SEMUA TES LAUNCH PADDING LULUS")
