@@ -133,6 +133,11 @@ class Trader:
             return rcpt
 
     def _ensure_approval(self, token_addr, spender):
+        # Spender bisa datang dari konstanta modul yang ditulis lowercase
+        # (mis. UNIVERSAL_ROUTER) — web3 menolak alamat non-checksum saat
+        # membangun call `allowance()`. Normalisasi di sini supaya bug kelas
+        # ini tidak bisa lagi menggagalkan buy SETELAH swap on-chain sukses.
+        spender = Web3.to_checksum_address(spender)
         t = self.erc20(token_addr)
         if t.functions.allowance(self.addr, spender).call() < MAX_UINT // 2:
             self._send(t.functions.approve(spender, MAX_UINT))
@@ -233,7 +238,15 @@ class Trader:
         got = got_raw / 10**dec
         eth_out_real = (eth_before - self.w3.eth.get_balance(self.addr)) / 1e18  # termasuk gas
 
-        self._ensure_approval(ca, router_used)
+        # Approval pasca-swap TIDAK boleh mematikan pencatatan posisi.
+        # Kalau langkah ini gagal (RPC, allowlist, dll.) token SUDAH ada di
+        # wallet; sell v4 tetap melakukan approval sendiri lewat
+        # v4.ensure_v4_sell_approval(). Sebelumnya exception di sini membuat
+        # posisi tidak pernah tercatat → tidak ada TP/SL otomatis.
+        try:
+            self._ensure_approval(ca, router_used)
+        except Exception as _e:
+            print(f"[trader] approval pasca-buy gagal (posisi tetap dicatat): {_e}")
         honeypot = not self._can_sell(ca, ptype, fee, got_raw)
 
         return {

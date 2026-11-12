@@ -176,7 +176,7 @@ try:
           txs[0]["kind"] == "erc20_approve" and txs[0]["spender"] == v4.PERMIT2)
     check("step2 = Permit2.approve ke UNIVERSAL_ROUTER",
           txs[1]["kind"] == "permit2_approve"
-          and txs[1]["spender"].lower() == v4.UNIVERSAL_ROUTER)
+          and txs[1]["spender"].lower() == v4.UNIVERSAL_ROUTER.lower())
 except Exception as e:
     check("ensure_v4_sell_approval jalan", False, str(e))
 
