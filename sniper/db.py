@@ -118,7 +118,11 @@ def init():
             llm_model TEXT,
             checked_at INTEGER,
             alerted_at INTEGER,
-            block_buy INTEGER DEFAULT 0)""")
+            block_buy INTEGER DEFAULT 0,
+            quote_symbol TEXT DEFAULT '',
+            quote_asset_class TEXT DEFAULT '',
+            threshold_quote REAL DEFAULT 0.0,
+            raised_usd REAL DEFAULT 0.0)""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_status ON pons_queue(status)")
         # Migrasi aditif: DB yang dibuat sebelum kolom `block_buy` & curve metrics ada.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(pons_queue)")}
@@ -133,12 +137,25 @@ def init():
             "creator_tax_bps": "INTEGER DEFAULT 0",
             "socials": "TEXT DEFAULT ''",
             "queued_at": "INTEGER DEFAULT 0",
+            # Satuan kurva: raisedQuote/thresholdQuote selalu dalam satuan
+            # quote asset launch (ETH native, stablecoin, atau token equity).
+            # Tanpa kolom ini angka raised tidak bisa dibaca setelah masuk DB.
+            "quote_symbol": "TEXT DEFAULT ''",
+            "quote_asset_class": "TEXT DEFAULT ''",
+            "threshold_quote": "REAL DEFAULT 0.0",
+            "raised_usd": "REAL DEFAULT 0.0",
         }
         for col_name, col_def in curve_cols.items():
             if col_name not in cols:
                 c.execute(f"ALTER TABLE pons_queue ADD COLUMN {col_name} {col_def}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_launch_ts ON pons_queue(launch_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_progress ON pons_queue(progress)")
+        # Cache provenance: CA ini lahir dari factory Pons atau bukan.
+        # Dipakai bypass gate top10 (lihat sniper/pons_origin.py).
+        c.execute("""CREATE TABLE IF NOT EXISTS pons_origin(
+            ca TEXT PRIMARY KEY,
+            is_pons INTEGER DEFAULT 0,
+            checked_at INTEGER DEFAULT 0)""")
         for k, v in config.SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
         # v16.5 (Solusi B): migrasi DB lama — longgarkan slippage anchor
@@ -1123,14 +1140,17 @@ _PONS_UPDATABLE = {"symbol", "name", "total_supply", "status", "score",
                    "verdict", "reason", "llm_model", "checked_at", "alerted_at",
                    "block_buy", "progress", "volume_usd", "trade_count",
                    "market_cap_usd", "raised_eth", "creator_tax_bps", "socials",
-                   "queued_at"}
+                   "queued_at", "quote_symbol", "quote_asset_class",
+                   "threshold_quote", "raised_usd"}
 
 
 def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
                                 launch_ts=0, symbol="", name="", total_supply=0.0,
                                 progress=0.0, volume_usd=0.0, trade_count=0,
                                 market_cap_usd=0.0, raised_eth=0.0,
-                                creator_tax_bps=0, socials="") -> bool:
+                                creator_tax_bps=0, socials="",
+                                quote_symbol="", quote_asset_class="",
+                                threshold_quote=0.0, raised_usd=0.0) -> bool:
     """Catat atau perbarui kandidat kurva Pons V2 dari API.
 
     Jika CA belum pernah tercatat: INSERT status='new'.
@@ -1150,8 +1170,10 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
                 """INSERT INTO pons_queue
                    (ca, deployer, curve, launch_block, launch_ts, symbol, name,
                     total_supply, progress, volume_usd, trade_count,
-                    market_cap_usd, raised_eth, creator_tax_bps, socials, queued_at, status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')""",
+                    market_cap_usd, raised_eth, creator_tax_bps, socials,
+                    quote_symbol, quote_asset_class, threshold_quote, raised_usd,
+                    queued_at, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')""",
                 (ca, (deployer or "").strip().lower() or None,
                  (curve or "").strip().lower() or None,
                  int(launch_block or 0), int(launch_ts or 0),
@@ -1159,7 +1181,10 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
                  float(progress or 0.0), float(volume_usd or 0.0),
                  int(trade_count or 0), float(market_cap_usd or 0.0),
                  float(raised_eth or 0.0), int(creator_tax_bps or 0),
-                 socials or "", now))
+                 socials or "", str(quote_symbol or "")[:24],
+                 str(quote_asset_class or "")[:16],
+                 float(threshold_quote or 0.0), float(raised_usd or 0.0),
+                 now))
             return True
         st = row["status"]
         bb = row["block_buy"]
@@ -1171,7 +1196,12 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
         c.execute(
             """UPDATE pons_queue SET
                progress=?, volume_usd=?, trade_count=?, market_cap_usd=?,
-               raised_eth=?, creator_tax_bps=?, socials=?,
+               raised_eth=CASE WHEN ?>0 THEN ? ELSE raised_eth END,
+               creator_tax_bps=?, socials=?,
+               quote_symbol=COALESCE(NULLIF(?, ''), quote_symbol),
+               quote_asset_class=COALESCE(NULLIF(?, ''), quote_asset_class),
+               threshold_quote=CASE WHEN ?>0 THEN ? ELSE threshold_quote END,
+               raised_usd=CASE WHEN ?>0 THEN ? ELSE raised_usd END,
                symbol=COALESCE(NULLIF(?, ''), symbol),
                name=COALESCE(NULLIF(?, ''), name),
                status=?,
@@ -1179,8 +1209,12 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
                WHERE ca=?""",
             (float(progress or 0.0), float(volume_usd or 0.0),
              int(trade_count or 0), float(market_cap_usd or 0.0),
-             float(raised_eth or 0.0), int(creator_tax_bps or 0),
-             socials or "", symbol or "", name or "", new_status,
+             float(raised_eth or 0.0), float(raised_eth or 0.0),
+             int(creator_tax_bps or 0), socials or "",
+             str(quote_symbol or "")[:24], str(quote_asset_class or "")[:16],
+             float(threshold_quote or 0.0), float(threshold_quote or 0.0),
+             float(raised_usd or 0.0), float(raised_usd or 0.0),
+             symbol or "", name or "", new_status,
              new_status, now, ca))
         return reset
 
@@ -1228,6 +1262,41 @@ def get_pons_blocked_cas() -> set:
     with _lock, _conn() as c:
         return {str(r["ca"]).lower() for r in
                 c.execute("SELECT ca FROM pons_queue WHERE block_buy=1")}
+
+
+def is_pons_queue_member(ca) -> bool:
+    """True kalau CA pernah masuk antrean Radar Pons (= lahir dari Pons)."""
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return False
+    with _lock, _conn() as c:
+        return c.execute("SELECT 1 FROM pons_queue WHERE ca=?", (ca,)).fetchone() is not None
+
+
+def get_pons_origin(ca):
+    """Cache provenance dari tabel pons_origin, atau None kalau belum pernah dicek."""
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return None
+    with _lock, _conn() as c:
+        try:
+            row = c.execute("SELECT is_pons FROM pons_origin WHERE ca=?", (ca,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return bool(row["is_pons"]) if row else None
+
+
+def set_pons_origin(ca, is_pons):
+    """Simpan hasil deteksi factory Pons supaya tidak perlu HTTP tiap kali."""
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return
+    with _lock, _conn() as c:
+        c.execute(
+            """INSERT INTO pons_origin(ca, is_pons, checked_at) VALUES(?,?,?)
+               ON CONFLICT(ca) DO UPDATE SET is_pons=excluded.is_pons,
+                                             checked_at=excluded.checked_at""",
+            (ca, 1 if is_pons else 0, int(time.time())))
 
 
 def mark_pons_alerted(ca, symbol=None, name=None, score=0, verdict="AMAN",

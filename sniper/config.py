@@ -112,6 +112,10 @@ SETTING_DEFAULTS = {
     "safety_on":      "1",
     "dev_max_pct":    "5",
     "top10_max_pct":  "40",
+    # Token yang lahir dari factory Pons (launch organik, ada proyek) sering
+    # punya konsentrasi top10 tinggi di awal kurva. Bypass HANYA gate top10;
+    # dev / honeypot / clone guard tetap berlaku.
+    "pons_bypass_top10": "1",
     # ---- launch padding: satu alamat sebar token ke banyak dompet ----
     # 0 = filter mati. Isi misal 50 → skip kalau satu pengirim menyebar ke
     # >= 50 dompet di blok-blok pertama DAN dompet itu pegang >= pad_max_supply_pct.
@@ -260,6 +264,7 @@ SETTING_LABELS = {
     "safety_on":     "🛡 Safety filter (1=on 0=off)",
     "dev_max_pct":   "🕵️ Max dev holding (%)",
     "top10_max_pct": "🐋 Max top10 holders (%)",
+    "pons_bypass_top10": "📡 Bypass top10 utk token Pons (1/0)",
     "pad_min_wallets":    "🧩 Padding: min dompet dari 1 pengirim (0=off)",
     "pad_max_supply_pct": "🧩 Padding: min % supply di dompet itu",
     "pad_window_blocks":  "🧩 Padding: jumlah blok awal yang diperiksa",

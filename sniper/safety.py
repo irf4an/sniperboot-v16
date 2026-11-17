@@ -571,22 +571,38 @@ def check(trader, ca: str, pair) -> tuple[bool, str]:
         return False, f"dev pegang {dp:.1f}% supply (max {max_dev:.0f}%)"
 
     # ---- top-10 concentration ----
+    # Bypass khusus token Pons: launch lewat bonding curve organik, jadi
+    # konsentrasi top10 tinggi di awal itu normal (dan user minta token
+    # graduasi Pons jangan disaring gate ini). Dev/honeypot/clone tetap jalan.
+    pons_bypass = False
+    if db.get("pons_bypass_top10", str) == "1":
+        try:
+            from .pons_origin import is_pons_launch
+            pons_bypass = is_pons_launch(ca)
+        except Exception as e:
+            print(f"[safety] ⚠️ deteksi Pons gagal — gate top10 tetap aktif: "
+                  f"{e.__class__.__name__}: {e}")
+
     top_failed = False
-    exclude = {pair.get("pairAddress", ""), ca}
-    try:
-        dev = creator_of(ca)
-        if dev:
-            exclude.add(dev)
-    except Exception:
-        pass
-    try:
-        tp = top_holders_pct(trader, ca, exclude)
-        if tp <= 0:
-            top_failed = True  # 0% = data holder belum ke-index / kosong, bukan "aman"
-    except Exception:
-        tp, top_failed = -1.0, True
-    if not top_failed and tp > max_top:
-        return False, f"top10 holders pegang {tp:.1f}% (max {max_top:.0f}%)"
+    tp = -1.0
+    if pons_bypass:
+        print(f"[safety] 📡 {ca[:10]}… token Pons → bypass gate top10")
+    else:
+        exclude = {pair.get("pairAddress", ""), ca}
+        try:
+            dev = creator_of(ca)
+            if dev:
+                exclude.add(dev)
+        except Exception:
+            pass
+        try:
+            tp = top_holders_pct(trader, ca, exclude)
+            if tp <= 0:
+                top_failed = True  # 0% = data holder belum ke-index / kosong, bukan "aman"
+        except Exception:
+            tp, top_failed = -1.0, True
+        if not top_failed and tp > max_top:
+            return False, f"top10 holders pegang {tp:.1f}% (max {max_top:.0f}%)"
 
     # ---- 🧩 launch padding (holder padding / hidden concentration) ----
     # Satu alamat menyebar token ke ratusan dompet di blok-blok pertama, lalu
@@ -613,13 +629,14 @@ def check(trader, ca: str, pair) -> tuple[bool, str]:
                                    f"{pad['share_pct']:.0f}% supply")
 
     # ---- kebijakan saat verifikasi gagal ----
-    if dev_failed or top_failed:
+    if dev_failed or (top_failed and not pons_bypass):
         which = []
         if dev_failed: which.append("dev")
-        if top_failed: which.append("top10")
+        if top_failed and not pons_bypass: which.append("top10")
         w = "+".join(which)
         if fail_closed:
             return False, f"data {w} tidak bisa diverifikasi (Blockscout) — SKIP (fail-closed)"
         return True, f"⚠️ {w} tidak terverifikasi, lolos (fail-open)"
 
-    return True, f"dev {dp:.1f}% · top10 {tp:.1f}% · {audit_note}"
+    top_txt = "bypass (Pons)" if pons_bypass else f"{tp:.1f}%"
+    return True, f"dev {dp:.1f}% · top10 {top_txt} · {audit_note}"
