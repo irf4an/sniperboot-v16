@@ -55,6 +55,29 @@ def _txh(rcpt) -> str:
     return h if h.startswith("0x") else "0x" + h
 
 
+# Revert yang TIDAK akan sembuh kalau diulang: token/bursa nolak transfer
+# (freeze, blacklist, pause, trading dimatikan). Untuk kasus ini percobaan
+# kedua dengan min_out=1 cuma menambah revert + notifikasi tanpa peluang
+# berhasil — terukur 2.996 revert untuk 7 posisi sebelum pagar ini ada.
+_PERMANENT_REVERT_HINTS = (
+    "frozen", "freeze", "paused", "pause", "blacklist", "not transferable",
+    "nontransferable", "transfer not allowed", "trading disabled",
+    "transfers disabled", "not allowed",
+)
+
+
+def _permanent_revert(err) -> bool:
+    """True = revert permanen (freeze/blacklist/pause) → jangan coba lagi.
+
+    Sengaja HANYA keyword-based: revert harga/slippage yang tidak ter-decode
+    tetap harus boleh lewat panic exit (min_out=1), karena itu jaring
+    pengaman terakhir buat keluar dari pool yang bergerak. Yang kita buang
+    cuma percobaan kedua untuk revert yang jelas-jelas permanen.
+    """
+    msg = str(err).lower()
+    return any(h in msg for h in _PERMANENT_REVERT_HINTS)
+
+
 def _active_key():
     """Private key wallet aktif: dari DB (wallet aktif) dulu, fallback ke .env."""
     try:
@@ -216,6 +239,32 @@ class Trader:
                 raise RuntimeError(f"[skip] {sym} v4_poolkey_notfound (event "
                                    f"Initialize tidak ketemu dalam 200k blok)")
             fee = pk.fee
+            # ---------- 🧊 PROBE JUAL SEBELUM BELI (v4) ----------
+            # Pagar honeypot lama tidak berlaku untuk v4: _can_sell()
+            # langsung return True, jadi koin yang dev-nya nge-freeze
+            # transfer baru ketahuan SETELAH duit masuk. Di sini quoter
+            # diminta menjual balik jumlah token yang akan kita terima;
+            # kalau arah jual SUDAH revert sekarang, buy dibatalkan.
+            if float(db.get("prebuy_sell_probe") or 0) == 1:
+                _est = 0
+                try:
+                    _ok_q, _est, _ = self.quote_buy_tokens(
+                        ca, "v4", 0, wei_in, 0, pool_id=pool_id)
+                    _est = int(_est or 0) if _ok_q else 0
+                except Exception:
+                    _est = 0
+                if _est > 0:
+                    _r = None
+                    try:
+                        _r = v4mod.quote_sell(pk, _est, self.w3)
+                    except Exception:
+                        _r = None        # quoter/RPC ngadat → fail-open
+                    if _r is not None and (not _r.ok) and _r.kind in (
+                            "bad_revert", "not_enough_liquidity"):
+                        raise RuntimeError(
+                            f"[skip] {sym} pool MENOLAK jual (probe: {_r.kind}) — "
+                            f"kemungkinan token di-freeze/blacklist dev. BUY "
+                            f"DIBATALKAN sebelum dana masuk")
             self._last_v4_pool_id = pool_id  # disimpan buat posisi/quote sell
             commands, inputs, value = v4mod.encode_buy(pk, wei_in, min_out)
             fn = self.w3.eth.contract(
@@ -389,10 +438,12 @@ class Trader:
     def sell(self, pos, fraction, cur_price_native):
         """Jual `fraction` dari tokens_left.
 
-        Return (tokens_sold, eth_realized, gas_eth):
+        Return (tokens_sold, eth_realized, gas_eth, swap_tx):
         eth_realized = ETH ASLI yang masuk wallet (balance delta, bukan estimasi
         dari harga spot) — supaya PnL yang dilaporkan jujur walau price impact
         besar di pool tipis. gas_eth = total gas yang kepakai selama proses sell.
+        swap_tx = hash tx swap (None kalau tidak ada swap yang terkirim; jalur
+        approve tidak dihitung sebagai swap).
         """
         ca = Web3.to_checksum_address(pos["ca"])
         token = self.erc20(ca)
@@ -443,7 +494,10 @@ class Trader:
                 ).functions.execute(commands, inputs, int(time.time()) + 120)
             try:
                 send(mk_v4(min_out), is_swap=True)
-            except Exception:
+            except Exception as e:
+                if _permanent_revert(e):
+                    # freeze/blacklist/pause: percobaan kedua mustahil berhasil
+                    raise
                 send(mk_v4(1), is_swap=True)  # panic exit
         else:
             self._ensure_approval(ca, self.router3.address)
@@ -452,7 +506,9 @@ class Trader:
                     ca, self.weth_addr, pos["fee"], self.addr, amount_raw, mo, 0))
             try:
                 send(mk(min_out), is_swap=True)
-            except Exception:
+            except Exception as e:
+                if _permanent_revert(e):
+                    raise
                 send(mk(1), is_swap=True)
             wbal = self.weth.functions.balanceOf(self.addr).call()
             if wbal > weth_before:

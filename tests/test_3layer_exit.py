@@ -38,7 +38,11 @@ def _make_pos(ts=None, tp1_done=0, tp2_done=None, tokens_left=TOKENS_AWAL):
 
 class FakeDB:
     def __init__(self, settings=None, pos=None):
-        self.settings = settings or {}
+        # Tes ini menguji LOGIKA ladder exit, bukan akuntansi harga: pakai
+        # mode pricing lama (paper_honest=0). Akuntansi jujur punya tesnya
+        # sendiri di test_sell_circuit_breaker.py.
+        self.settings = {"paper_honest": "0"}
+        self.settings.update(settings or {})
         self.updates = []
         self.pos = pos or _make_pos()
 

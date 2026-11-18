@@ -25,6 +25,19 @@ def _txlink(h):
     return f"[🔍 tx]({config.EXPLORER_URL}/tx/{h})" if h else ""
 
 
+def _honest_paper() -> bool:
+    """True = akuntansi paper hanya memakai harga yang BISA DIEKSEKUSI.
+
+    Dipakai untuk dua hal: (1) hasil jual simulasi tidak dikarang dari harga
+    layar saat quote gagal, (2) TP/SL posisi simulasi tidak dipicu dari harga
+    layar. Keduanya sumber utama rekor paper yang tidak bisa direplikasi live.
+    """
+    try:
+        return float(db.get("paper_honest")) == 1
+    except (TypeError, ValueError):
+        return True
+
+
 # ---------- 🎭 Kebijakan CA vanity ...7777 (v16.9, Opsi B) ----------
 def is_vanity_7777(ca) -> bool:
     """True bila alamat kontrak berakhiran 7777 (abaikan prefix 0x).
@@ -67,6 +80,8 @@ _notify = None  # async fn(text, buttons=None, **kw)
 _public_notify = None  # async fn(text, buttons=None) → channel log PUBLIK (opsional)
 _thin_warned = set()  # pos_id yang sudah dikasih warning pool tipis (anti-spam)
 _liq_last = {}       # pos_id -> liq USD terakhir (rug monitor)
+_sell_fails = {}     # pos_id -> jumlah gagal jual berturut-turut (circuit breaker)
+_stuck_notified = set()  # pos_id yang sudah ditandai macet
 
 
 def bind(trader, notify, public_notify=None):
@@ -137,7 +152,13 @@ async def execute_sell(pos_id: int, fraction: float, reason: str):
     """
     lock = await _sell_lock(pos_id)
     async with lock:
-        result = await _execute_sell_locked(pos_id, fraction, reason)
+        try:
+            result = await _execute_sell_locked(pos_id, fraction, reason)
+            _sell_fails.pop(pos_id, None)   # sukses → reset penghitung gagal
+        except Exception as e:
+            # 🧊 CIRCUIT BREAKER: kegagalan jual tidak boleh mengulang
+            # selamanya. Lihat _handle_sell_failure().
+            return _handle_sell_failure(pos_id, e)
     if pos_id not in _cleanup_marks and _cleanup_done(pos_id):
         _cleanup(pos_id)
         _sell_locks.pop(pos_id, None)
@@ -145,9 +166,62 @@ async def execute_sell(pos_id: int, fraction: float, reason: str):
     return result
 
 
+def _handle_sell_failure(pos_id: int, err) -> str:
+    """Catat kegagalan jual; setelah `sell_max_fail` kali berturut → tandai MACET.
+
+    Kenapa ini ada: dulu kegagalan jual (token di-freeze dev, blacklist,
+    LP dikosongkan) membiarkan posisi tetap `open`, jadi tiap siklus monitor
+    (poll_seconds = 3 dtk) mencoba jual lagi — selamanya. Terukur di log
+    produksi: 1.496 percobaan untuk 7 posisi + 2.996 revert dalam ~6 jam,
+    plus notifikasi Telegram tiap 3 detik.
+
+    Sekarang: N gagal → status `closed_stuck`, percobaan otomatis BERHENTI,
+    satu notifikasi jelas, dan operator bisa coba lagi lewat jual manual
+    (yang me-reset penghitung lewat jalan pintas di _execute_sell_locked).
+    """
+    import time as _t
+    pos = db.position(pos_id) or {}
+    sym = pos.get("symbol") or "?"
+    ca = str(pos.get("ca") or "")
+    try:
+        limit = max(int(db.get("sell_max_fail", int) or 3), 1)
+    except (TypeError, ValueError):
+        limit = 3
+    n = _sell_fails.get(pos_id, 0) + 1
+    _sell_fails[pos_id] = n
+    why = str(err).replace("\n", " ")[:180]
+
+    if n < limit:
+        return (f"⚠️ gagal jual **{sym}** (percobaan {n}/{limit}) — dicoba lagi "
+                f"di siklus berikutnya.\nalasan: {why}")
+
+    # batas tercapai → BERHENTI mencoba
+    _sell_fails.pop(pos_id, None)
+    _stuck_notified.add(pos_id)
+    try:
+        db.update_position(pos_id, status="closed_stuck", closed_at=int(_t.time()))
+    except Exception:
+        traceback.print_exc()
+    _cleanup(pos_id)
+    return (f"🧊 **POSISI MACET — {sym}** (`{ca[:12]}...`)\n"
+            f"gagal dijual **{limit}x berturut-turut**. Token kemungkinan "
+            f"di-freeze/blacklist dev, atau LP-nya sudah dikosongkan.\n"
+            f"alasan terakhir: {why}\n"
+            f"_Percobaan otomatis DIHENTIKAN (status `closed_stuck`) — tidak ada "
+            f"lagi transaksi/RPC ke token ini. Kalau kondisi berubah, tekan "
+            f"tombol jual manual: penghitung di-reset dan posisi dicoba sekali lagi._")
+
+
 async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     """Implementasi inti execute_sell — HARUS dipanggil dalam lock per-posisi."""
     pos = db.position(pos_id)
+    if pos and pos["status"] == "closed_stuck" and reason == "manual":
+        # 🧊 Jalan pintas operator: posisi yang sudah ditandai macet boleh
+        # dicoba sekali lagi secara sadar (mis. dev sudah unfreeze / LP balik).
+        db.update_position(pos_id, status="open")
+        _sell_fails.pop(pos_id, None)
+        _stuck_notified.discard(pos_id)
+        pos = db.position(pos_id)
     if not pos or pos["status"] != "open":
         return "posisi sudah closed / tidak ditemukan"
     pair = await current_pair(pos)
@@ -162,6 +236,9 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
         price = float(pair.get("priceUsd") or 0)
         price_native = float(pair.get("priceNative") or 0)
     spot_pnl = price / pos["entry_price_usd"] - 1 if price > 0 else 0
+    # True = exit simulasi TIDAK BISA DIHARGAI (quote jual gagal). Di mode
+    # jujur, posisi seperti ini dicatat apa adanya, bukan dikarang.
+    unpriced_exit = False
 
     # ---------- 🧪 POSISI SIMULASI (virtual paper trading) ----------
     # Tidak ada swap on-chain: saldo wallet = 0 untuk token simulasi, jadi
@@ -175,6 +252,7 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
         # simulasi mencerminkan hasil Nx yang sebenarnya bisa didapat.
         eth_real = None
         pool_drained_onchain = False
+        quote_failed = False
         if _trader:
             try:
                 amt_raw = int(sold * 10**(
@@ -186,22 +264,37 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
                         pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
                     if q_eth and q_eth > 0:
                         eth_real = q_eth
-                    elif pos.get("pool_type") == "v4" and pos.get("pair_address"):
-                        from . import v4 as v4mod
-                        onchain_l = await asyncio.to_thread(
-                            v4mod.liquidity, pos["pair_address"], _trader.w3)
-                        if onchain_l is not None and onchain_l <= 0:
-                            pool_drained_onchain = True
+                    else:
+                        quote_failed = True
+                        if pos.get("pool_type") == "v4" and pos.get("pair_address"):
+                            from . import v4 as v4mod
+                            onchain_l = await asyncio.to_thread(
+                                v4mod.liquidity, pos["pair_address"], _trader.w3)
+                            if onchain_l is not None and onchain_l <= 0:
+                                pool_drained_onchain = True
+                else:
+                    quote_failed = True
             except Exception:
+                quote_failed = True
                 if reason == "rug":
                     # revert/probing gagal total saat rug → asumsi pool mati
                     eth_real = 0.0
+        else:
+            quote_failed = True
         if eth_real is None:
             if reason == "rug" or pool_drained_onchain:
                 # 💀 RUG PULL / LP Kosong On-Chain: quote 0 & getLiquidity=0 →
                 # pool on-chain sudah terkuras (net loss -100%), JANGAN kasih
                 # angka palsu dari harga beku Dexscreener.
                 eth_real = 0.0
+            elif _honest_paper() and quote_failed:
+                # 🧪 AKUNTANSI JUJUR: hasil jual TIDAK DIKETAHUI (quoter/RPC
+                # gagal). Jangan karang dari harga layar — itu yang membuat
+                # rekor paper tampak 81% menang padahal live-nya rug. Catat
+                # realized 0 (rugi -100%) dan tandai `closed_unsellable`
+                # supaya kelihatan di statistik, bukan disembunyikan.
+                eth_real = 0.0
+                unpriced_exit = True
             else:
                 eth_real = sold * price_native if price_native > 0 else (
                     pos["eth_spent"] * fraction * (1 + spot_pnl))
@@ -225,6 +318,25 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     cost_eth = pos["eth_spent"] * (sold / pos["tokens_total"]) if pos["tokens_total"] else 0
     real_pnl = (eth_real / cost_eth - 1) if cost_eth > 0 else 0
     real_pnl = max(real_pnl, -1.0)
+
+    if unpriced_exit:
+        # 🧪 Exit yang tidak bisa dihargai dicatat sebagai posisi TIDAK BISA
+        # DIJUAL — bukan sebagai TP/SL yang seolah berhasil. Status sendiri
+        # supaya statistik tidak mencampurnya dengan exit yang benar terjadi.
+        import time as _t2
+        db.update_position(pos_id, tokens_left=0, status="closed_unsellable",
+                           closed_at=int(_t2.time()))
+        _cleanup(pos_id)
+        try:
+            db.mark_decision_outcome(pos["ca"], "unsellable (quote jual gagal)")
+        except Exception:
+            pass
+        return (f"{sim_prefix}{pos['symbol']} (`{pos['ca'][:10]}...`) — "
+                f"**TIDAK BISA DIJUAL**\n"
+                f"quote jual on-chain gagal untuk {sold:,.0f} token; modal "
+                f"{pos['eth_spent']:.6f} ETH dicatat sebagai rugi penuh.\n"
+                f"_Harga layar {spot_pnl * 100:+.1f}% DIABAIKAN — mode jujur "
+                f"tidak menghitung angka yang tidak bisa dieksekusi._")
 
     thin = spot_pnl > 0 and (spot_pnl - real_pnl) > 0.30
     left = max(pos["tokens_left"] - sold, 0)
@@ -357,13 +469,27 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     return text
 
 
+async def _check_all(positions):
+    """Cek semua posisi; satu posisi yang error TIDAK membatalkan yang lain."""
+    for pos in positions:
+        try:
+            await _check(pos)
+        except Exception:
+            traceback.print_exc()
+
+
 async def monitor_loop():
     while True:
         try:
-            for pos in db.open_positions():
-                await _check(pos)
+            positions = db.open_positions()
         except Exception:
             traceback.print_exc()
+            await asyncio.sleep(_anti_rug_poll_seconds())
+            continue
+        # 🛡 Dulu try membungkus seluruh for: satu exception di posisi
+        # pertama membuat semua posisi di belakangnya tidak dicek pada
+        # siklus itu — berulang terus kalau posisinya kronis.
+        await _check_all(positions)
         await asyncio.sleep(_anti_rug_poll_seconds())
 
 
@@ -384,6 +510,13 @@ def _anti_rug_poll_seconds() -> float:
 
 
 async def _check(pos):
+    # 🛑 REM DARURAT (`live_monitor_on=0`): engine tidak menyentuh posisi
+    # RIIL sama sekali — tidak ada percobaan jual, approve, atau quote.
+    # Posisi simulasi tetap diproses supaya latihan jalan terus. Ini yang
+    # bikin pindah ke mode latihan benar-benar menghentikan bot menyentuh
+    # posisi nyata.
+    if not pos.get("is_simulated") and float(db.get("live_monitor_on")) == 0:
+        return
     # pembersih zombie: open tapi sisa 0 (dari versi lama / dust) → tutup
     if (pos["tokens_left"] or 0) <= 0:
         import time as _t
@@ -548,39 +681,58 @@ async def _check(pos):
     # boltak -30%+ palsu di poll pertama dan memicu SL palsu. PnL dihitung
     # dari quoter on-chain asli (nembus depth pool); Dexscreener hanya fallback.
     onchain_pnl = None
+    q_eth = 0.0
+    amt_raw = 0
     if _trader:
         try:
             token = _trader.erc20(pos["ca"])
             dec = await asyncio.to_thread(token.functions.decimals().call)
             amt_raw = int(pos["tokens_left"] * 10**dec)
-            if amt_raw > 0:
+        except Exception:
+            amt_raw = 0
+        if amt_raw > 0:
+            try:
                 q_eth = await asyncio.to_thread(
                     _trader.quote_sell_eth, pos["ca"], pos["pool_type"],
                     pos["fee"], amt_raw, pool_id=pos.get("pair_address"))
-                cost_eth = pos["eth_spent"] * (pos["tokens_left"] / pos["tokens_total"]) \
-                    if pos["tokens_total"] else 0
-                if cost_eth > 0 and q_eth > 0:
-                    onchain_pnl = q_eth / cost_eth - 1.0
-                elif pos.get("pool_type") == "v4" and pos.get("pair_address"):
+            except Exception:
+                # Quote gagal (pool kosong / quoter revert) BUKAN alasan
+                # melewati cek likuiditas di bawah — dulu satu exception
+                # di sini bikin seluruh blok ke-skip, LP kosong tidak
+                # terdeteksi sebagai rug, dan posisi jatuh ke harga layar
+                # sampai time-stop menghajar jual berulang-ulang.
+                q_eth = 0.0
+            cost_eth = pos["eth_spent"] * (pos["tokens_left"] / pos["tokens_total"]) \
+                if pos["tokens_total"] else 0
+            if cost_eth > 0 and q_eth > 0:
+                onchain_pnl = q_eth / cost_eth - 1.0
+            elif pos.get("pool_type") == "v4" and pos.get("pair_address"):
+                try:
                     from . import v4 as v4mod
                     onchain_l = await asyncio.to_thread(
                         v4mod.liquidity, pos["pair_address"], _trader.w3)
-                    if onchain_l is not None and onchain_l <= 0:
-                        _cleanup(pos["id"])
-                        await _notify_exit(
-                            f"🚨 **{pos['symbol']}** LP v4 on-chain = 0 "
-                            f"(walau layar Dexscreener masih ${liq:,.0f}) — "
-                            f"RUG PULL ON-CHAIN! EMERGENCY EXIT")
-                        await _notify_exit(await execute_sell(pos["id"], 1.0, "rug"))
-                        return
-        except Exception:
-            pass  # quoter gagal → fallback ke harga layar di bawah
+                except Exception:
+                    onchain_l = None
+                if onchain_l is not None and onchain_l <= 0:
+                    _cleanup(pos["id"])
+                    await _notify_exit(
+                        f"🚨 **{pos['symbol']}** LP v4 on-chain = 0 "
+                        f"(walau layar Dexscreener masih ${liq:,.0f}) — "
+                        f"RUG PULL ON-CHAIN! EMERGENCY EXIT")
+                    await _notify_exit(await execute_sell(pos["id"], 1.0, "rug"))
+                    return
     if onchain_pnl is not None:
         pnl = onchain_pnl
         # Harga efektif untuk peak & trailing: turunan dari kuoter on-chain,
         # sama basis dengan entry_price_usd. Harga layar Dexscreener tertinggal
         # 20-30s → bandingkan layar vs entry on-chain memicu trail palsu.
         price = pos["entry_price_usd"] * (1.0 + onchain_pnl)
+    elif _honest_paper() and pos.get("is_simulated"):
+        # 🧪 AKUNTANSI JUJUR: quote on-chain gagal → PnL posisi simulasi TIDAK
+        # DIKETAHUI. Jangan pakai harga layar untuk memicu TP/SL — itu sumber
+        # "kemenangan" yang tidak bisa dieksekusi saat live. Cek berbasis
+        # waktu (time-stop) dan cek likuiditas di atas tetap berjalan.
+        return
     else:
         pnl = price / pos["entry_price_usd"] - 1
     tp1_v = pos.get("tp1_x") or db.get("tp1")
@@ -726,6 +878,7 @@ def build_recap(since_ts: int) -> str:
         f"🛒 entry baru: **{d['buys']}** (${d['usd_spent']:.2f})",
         f"🎯 TP2: {n('closed_tp2')} · ✅→📈 trail: {n('closed_trail')} · "
         f"🛑 SL: {n('closed_sl')} · 🚨 rug: {n('closed_rug')} · 👆 manual: {n('closed_manual')}",
+        f"🧊 tak bisa dijual: {n('closed_unsellable')} · 🧊 macet: {n('closed_stuck')}",
         f"{emo} PnL realized (posisi closed): **{net:+.6f} ETH**",
         f"📊 masih open: {d['open']} posisi",
     ]

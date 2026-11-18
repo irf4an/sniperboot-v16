@@ -27,13 +27,13 @@ def check(name, cond, detail=""):
 
 
 db.init()
-check("default config buy_slippage == '0.60'",
-      config.SETTING_DEFAULTS.get("buy_slippage") == "0.60",
+check("default config buy_slippage == '0.25'",
+      config.SETTING_DEFAULTS.get("buy_slippage") == "0.25",
       config.SETTING_DEFAULTS.get("buy_slippage"))
 check("default config scanner_interval_sec == '5'",
       config.SETTING_DEFAULTS.get("scanner_interval_sec") == "5",
       config.SETTING_DEFAULTS.get("scanner_interval_sec"))
-check("DB baru buy_slippage = 0.60", db.get("buy_slippage") == 0.60,
+check("DB baru buy_slippage = 0.25", db.get("buy_slippage") == 0.25,
       str(db.get("buy_slippage")))
 check("DB baru scanner_interval_sec = 5",
       db.get("scanner_interval_sec") == 5,
@@ -46,7 +46,7 @@ check("DB scanner_mcap_max default = 45000",
 db.set_("buy_slippage", "0.30")
 db.set_("scanner_interval_sec", "15")
 db.init()   # migrasi harus menaikkan kembali
-check("migrasi DB lama 0.30 → 0.60", db.get("buy_slippage") == 0.60,
+check("migrasi DB lama 0.30 → 0.25", db.get("buy_slippage") == 0.25,
       str(db.get("buy_slippage")))
 check("migrasi DB lama 15 → 5", db.get("scanner_interval_sec") == 5,
       str(db.get("scanner_interval_sec")))

@@ -224,6 +224,7 @@ def insider_buys_panel(window_sec=3600):
     lines = [f"🔥 **Log Beli Insider ({lbl} terakhir)**"]
     if not rows:
         lines.append("\n_Belum ada transaksi beli insider di jendela waktu ini._")
+        lines.append("_Urutan panel ini: jumlah dompet unik terbanyak → jumlah beli._")
     else:
         lines.append("_Urutan: jumlah dompet unik terbanyak → jumlah beli:_\n")
         for i, r in enumerate(rows, 1):

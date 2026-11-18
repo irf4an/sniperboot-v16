@@ -144,7 +144,8 @@ def init():
         # v16.5 (Solusi B): migrasi DB lama — longgarkan slippage anchor
         # Dexscreener 0.30 → 0.60 + percepat siklus scanner 15 → 5 detik.
         # ON CONFLICT DO UPDATE hanya kalau nilai masih default lama.
-        for _k, _old, _new in (("buy_slippage", "0.30", "0.60"),
+        for _k, _old, _new in (("buy_slippage", "0.30", "0.25"),
+                               ("buy_slippage", "0.60", "0.25"),
                                ("scanner_interval_sec", "15", "5")):
             c.execute("UPDATE settings SET value=:new "
                       "WHERE key=:k AND value=:old",
@@ -240,6 +241,13 @@ def add_source(chat_id, topic_id, name, mcap_max):
         c.execute("INSERT INTO sources(chat_id,topic_id,name,mcap_max) VALUES(?,?,?,?)",
                   (chat_id, topic_id, name, mcap_max))
     _invalidate()
+
+
+def set_source_enabled(sid, enabled):
+    """Nyalakan/matikan source secara eksplisit (bukan toggle)."""
+    with _lock, _conn() as c:
+        c.execute("UPDATE sources SET enabled=? WHERE id=?", (1 if enabled else 0, sid))
+    _src_cache["ts"] = 0     # paksa refresh cache
 
 
 def toggle_source(sid):
@@ -369,6 +377,8 @@ def stats():
             "trail":   row(f"SELECT COUNT(*) FROM positions WHERE status='closed_trail' {pos_and}"),
             "tp1full": row(f"SELECT COUNT(*) FROM positions WHERE status='closed_tp1' {pos_and}"),
             "empty":   row(f"SELECT COUNT(*) FROM positions WHERE status='closed_empty' {pos_and}"),
+            "unsellable": row(f"SELECT COUNT(*) FROM positions WHERE status='closed_unsellable' {pos_and}"),
+            "stuck":   row(f"SELECT COUNT(*) FROM positions WHERE status='closed_stuck' {pos_and}"),
             "spent":   row(f"SELECT COALESCE(SUM(usd_spent),0) FROM positions {pos_cond}"),
             "eth_out": row(f"SELECT COALESCE(SUM(realized_eth),0) FROM positions {pos_cond}"),
             "eth_in":  row(f"SELECT COALESCE(SUM(eth_spent),0) FROM positions {pos_cond}"),

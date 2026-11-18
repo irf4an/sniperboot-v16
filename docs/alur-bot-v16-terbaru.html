@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hoodsniper v16 — Alur Bot</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'JetBrains Mono',monospace;background:#020617;min-height:100vh;padding:2rem;color:#fff}
+  .container{max-width:1560px;margin:0 auto}
+  .header{margin-bottom:1.5rem}
+  .header-row{display:flex;align-items:center;gap:1rem;margin-bottom:.5rem}
+  .pulse-dot{width:12px;height:12px;background:#22d3ee;border-radius:50%;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  h1{font-size:1.4rem;font-weight:700;letter-spacing:-.02em}
+  .subtitle{color:#94a3b8;font-size:.8rem;margin-left:1.75rem}
+  .diagram-container{background:rgba(15,23,42,.5);border-radius:1rem;border:1px solid #1e293b;padding:1.25rem;overflow-x:auto}
+  svg{width:100%;min-width:1200px;display:block}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;margin-top:1.5rem}
+  .card{background:rgba(15,23,42,.5);border-radius:.75rem;border:1px solid #1e293b;padding:1.25rem}
+  .card-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem}
+  .card-dot{width:8px;height:8px;border-radius:50%}
+  .card-dot.cyan{background:#22d3ee}.card-dot.emerald{background:#34d399}
+  .card-dot.violet{background:#a78bfa}.card-dot.amber{background:#fbbf24}.card-dot.rose{background:#fb7185}
+  .card h3{font-size:.85rem;font-weight:600}
+  .card ul{list-style:none;color:#94a3b8;font-size:.72rem}
+  .card li{margin-bottom:.375rem}
+  .footer{text-align:center;margin-top:1.25rem;color:#475569;font-size:.72rem}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-row"><div class="pulse-dot"></div><h1>hoodsniper v16 — Alur Bot (setelah perbaikan)</h1></div>
+    <p class="subtitle">Robinhood Chain (4663) · 4 sumber sinyal → 1 pipa → 10 gerbang → paper/live → monitor → exit berbounded</p>
+  </div>
+
+  <div class="diagram-container">
+  <svg viewBox="0 0 1460 1320">
+    <defs>
+      <marker id="a" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+      </marker>
+      <marker id="ac" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+      </marker>
+      <marker id="ae" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+      </marker>
+      <marker id="ar" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/>
+      </marker>
+      <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+        <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+      </pattern>
+    </defs>
+
+    <rect width="100%" height="100%" fill="url(#grid)"/>
+
+    <!-- ================= ARROWS (drawn first = behind) ================= -->
+    <!-- startup -> sources -->
+    <line x1="720" y1="145" x2="720" y2="170" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="720" y1="170" x2="165" y2="170" stroke="#fbbf24" stroke-width="1.5"/>
+    <line x1="165" y1="170" x2="165" y2="203" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="720" y1="170" x2="1355" y2="170" stroke="#fbbf24" stroke-width="1.5"/>
+    <line x1="1355" y1="170" x2="1355" y2="203" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#a)"/>
+
+    <!-- sources -> funnel -->
+    <line x1="290" y1="237" x2="360" y2="237" stroke="#22d3ee" stroke-width="1.5"/>
+    <line x1="290" y1="313" x2="360" y2="313" stroke="#22d3ee" stroke-width="1.5"/>
+    <line x1="290" y1="389" x2="360" y2="389" stroke="#22d3ee" stroke-width="1.5"/>
+    <line x1="290" y1="465" x2="360" y2="465" stroke="#22d3ee" stroke-width="1.5"/>
+    <line x1="360" y1="237" x2="360" y2="465" stroke="#22d3ee" stroke-width="1.5"/>
+    <line x1="360" y1="229" x2="398" y2="229" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#ac)"/>
+
+    <!-- funnel chain -->
+    <line x1="550" y1="253" x2="550" y2="263" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="313" x2="550" y2="323" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="373" x2="550" y2="383" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="433" x2="550" y2="443" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="493" x2="550" y2="503" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="553" x2="550" y2="563" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="637" x2="550" y2="647" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="721" x2="550" y2="731" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="781" x2="550" y2="791" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="550" y1="841" x2="550" y2="851" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="473" y1="885" x2="473" y2="917" stroke="#34d399" stroke-width="1.5"/>
+    <line x1="627" y1="885" x2="627" y2="917" stroke="#34d399" stroke-width="1.5"/>
+    <line x1="473" y1="917" x2="627" y2="917" stroke="#34d399" stroke-width="1.5"/>
+    <line x1="550" y1="917" x2="550" y2="955" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+
+    <!-- posisi -> monitor -->
+    <line x1="700" y1="860" x2="748" y2="860" stroke="#34d399" stroke-width="1.5"/>
+    <line x1="748" y1="229" x2="748" y2="1000" stroke="#34d399" stroke-width="1.5"/>
+    <line x1="748" y1="229" x2="750" y2="229" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+
+    <!-- monitor chain -->
+    <line x1="910" y1="253" x2="910" y2="263" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="910" y1="313" x2="910" y2="323" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="910" y1="373" x2="910" y2="383" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="910" y1="447" x2="910" y2="457" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="910" y1="507" x2="910" y2="517" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="910" y1="567" x2="910" y2="577" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+    <line x1="910" y1="627" x2="910" y2="637" stroke="#34d399" stroke-width="1.5" marker-end="url(#ae)"/>
+
+    <!-- monitor -> exit -->
+    <line x1="1070" y1="667" x2="1108" y2="667" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a)"/>
+
+    <!-- exit chain -->
+    <line x1="1260" y1="253" x2="1260" y2="263" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="1260" y1="321" x2="1260" y2="331" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="1260" y1="389" x2="1260" y2="399" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="1260" y1="463" x2="1260" y2="473" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a)"/>
+    <line x1="1260" y1="523" x2="1260" y2="533" stroke="#fb7185" stroke-width="1.5" marker-end="url(#ar)"/>
+    <line x1="1260" y1="597" x2="1260" y2="607" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a)"/>
+
+    <!-- exit -> output -->
+    <line x1="1260" y1="665" x2="1260" y2="990" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#a)"/>
+
+    <!-- ================= STARTUP ================= -->
+    <rect x="30" y="30" width="1400" height="115" rx="12" fill="rgba(251,191,36,.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+    <text x="42" y="48" fill="#fbbf24" font-size="10" font-weight="600">STARTUP — bot.py</text>
+
+    <rect x="44" y="62" width="222" height="64" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="155" y="84" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">db.init()</text>
+    <text x="155" y="100" fill="#94a3b8" font-size="9" text-anchor="middle">buat tabel · seed setting</text>
+    <text x="155" y="114" fill="#94a3b8" font-size="9" text-anchor="middle">migrasi nilai lama</text>
+
+    <rect x="274" y="62" width="222" height="64" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="385" y="84" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">config.validate()</text>
+    <text x="385" y="100" fill="#94a3b8" font-size="9" text-anchor="middle">router · TG API · token bot</text>
+    <text x="385" y="114" fill="#94a3b8" font-size="9" text-anchor="middle">ADMIN_ID — wajib ada</text>
+
+    <rect x="504" y="62" width="222" height="64" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="615" y="84" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Trader()</text>
+    <text x="615" y="100" fill="#94a3b8" font-size="9" text-anchor="middle">wallet DB → .env</text>
+    <text x="615" y="114" fill="#94a3b8" font-size="9" text-anchor="middle">cek chain_id = 4663</text>
+
+    <rect x="734" y="62" width="222" height="64" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="845" y="84" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">userbot Telethon</text>
+    <text x="845" y="100" fill="#94a3b8" font-size="9" text-anchor="middle">hanya bila enabled=1</text>
+    <text x="845" y="114" fill="#94a3b8" font-size="9" text-anchor="middle">sesi mati → nonaktif</text>
+
+    <rect x="964" y="62" width="222" height="64" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="1075" y="84" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">🔎 self-check source</text>
+    <text x="1075" y="100" fill="#94a3b8" font-size="9" text-anchor="middle">cek entity tiap grup</text>
+    <text x="1075" y="114" fill="#34d399" font-size="8" text-anchor="middle">lapor DM + auto-disable</text>
+
+    <rect x="1194" y="62" width="222" height="64" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="1305" y="84" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">8 loop + control bot</text>
+    <text x="1305" y="100" fill="#94a3b8" font-size="9" text-anchor="middle">monitor · scanner · tracker</text>
+    <text x="1305" y="114" fill="#94a3b8" font-size="9" text-anchor="middle">rekap · radar pons</text>
+
+    <!-- ================= SOURCES ================= -->
+    <text x="44" y="190" fill="#22d3ee" font-size="11" font-weight="600">SUMBER SINYAL</text>
+
+    <rect x="40" y="205" width="250" height="64" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="165" y="228" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">SCANNER on-chain</text>
+    <text x="165" y="244" fill="#94a3b8" font-size="9" text-anchor="middle">event Initialize pool v4</text>
+    <text x="165" y="258" fill="#94a3b8" font-size="9" text-anchor="middle">+ Dexscreener baru/boost</text>
+
+    <rect x="40" y="281" width="250" height="64" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="165" y="304" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">GRUP TELEGRAM</text>
+    <text x="165" y="320" fill="#94a3b8" font-size="9" text-anchor="middle">userbot · Fomo · Robinhouse</text>
+    <text x="165" y="334" fill="#22d3ee" font-size="8" text-anchor="middle">extract CA ketat (regex)</text>
+
+    <rect x="40" y="357" width="250" height="64" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="165" y="380" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">INSIDER TRACKER</text>
+    <text x="165" y="396" fill="#94a3b8" font-size="9" text-anchor="middle">copy-trade smart money</text>
+    <text x="165" y="410" fill="#94a3b8" font-size="8" text-anchor="middle">alert-only (tidak beli)</text>
+
+    <rect x="40" y="433" width="250" height="64" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="165" y="456" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">RADAR PONS</text>
+    <text x="165" y="472" fill="#94a3b8" font-size="9" text-anchor="middle">alert pra-graduasi</text>
+    <text x="165" y="486" fill="#fb7185" font-size="8" text-anchor="middle">matang · pons_radar_on=0</text>
+
+    <!-- ================= FUNNEL ================= -->
+    <text x="400" y="190" fill="#34d399" font-size="11" font-weight="600">PIPA TUNGGAL — listener.process_ca()</text>
+
+    <rect x="400" y="205" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="234" fill="#fff" font-size="12" font-weight="600" text-anchor="middle">process_ca(ca, src)</text>
+
+    <rect x="400" y="265" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="285" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">1 · paused? + dedupe CA</text>
+    <text x="550" y="301" fill="#94a3b8" font-size="8" text-anchor="middle">satu CA diproses sekali (tabel calls)</text>
+
+    <rect x="400" y="325" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="345" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">2 · best_pair Dexscreener</text>
+    <text x="550" y="361" fill="#94a3b8" font-size="8" text-anchor="middle">+ guard v4-only untuk SCANNER</text>
+
+    <rect x="400" y="385" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="405" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">3 · filter mcap · liq · sosmed</text>
+    <text x="550" y="421" fill="#94a3b8" font-size="8" text-anchor="middle">liq null v4 → baca on-chain</text>
+
+    <rect x="400" y="445" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="465" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">4 · veto Radar Pons (0 ms)</text>
+    <text x="550" y="481" fill="#94a3b8" font-size="8" text-anchor="middle">cek set di memori, tanpa query</text>
+
+    <rect x="400" y="505" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="525" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">5 · gate v4 pool</text>
+    <text x="550" y="541" fill="#94a3b8" font-size="8" text-anchor="middle">pool harus hidup (likuiditas &gt; 0)</text>
+
+    <rect x="400" y="565" width="300" height="72" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="550" y="585" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">6 · SAFETY (berlapis)</text>
+    <text x="550" y="601" fill="#94a3b8" font-size="8" text-anchor="middle">audit kontrak 14 selector + ABI</text>
+    <text x="550" y="615" fill="#fb7185" font-size="8" text-anchor="middle">🔧 fail-closed saat data tak terbaca</text>
+    <text x="550" y="629" fill="#94a3b8" font-size="8" text-anchor="middle">clone guard · rate-limit keluarga · dev/top10</text>
+
+    <rect x="400" y="649" width="300" height="72" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="669" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">7 · FAST-PATH GOLDILOCKS</text>
+    <text x="550" y="685" fill="#94a3b8" font-size="8" text-anchor="middle">umur pool · rasio liq/mcap · mcap</text>
+    <text x="550" y="699" fill="#94a3b8" font-size="8" text-anchor="middle">quoter on-chain (harga nyata, bukan layar)</text>
+    <text x="550" y="713" fill="#34d399" font-size="8" text-anchor="middle">guard mcap on-chain = anti beli di pucuk</text>
+
+    <rect x="400" y="733" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="550" y="753" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">8 · staleness gate</text>
+    <text x="550" y="769" fill="#94a3b8" font-size="8" text-anchor="middle">drift harga &gt; 50% → buy dibatalkan</text>
+
+    <rect x="400" y="793" width="300" height="48" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="550" y="822" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">agent_dry_run ?</text>
+
+    <rect x="400" y="853" width="146" height="64" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="473" y="874" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">🧪 PAPER</text>
+    <text x="473" y="890" fill="#94a3b8" font-size="8" text-anchor="middle">posisi simulasi</text>
+    <text x="473" y="904" fill="#94a3b8" font-size="8" text-anchor="middle">kas virtual $20</text>
+
+    <rect x="554" y="853" width="146" height="64" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="627" y="874" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">LIVE</text>
+    <text x="627" y="890" fill="#94a3b8" font-size="8" text-anchor="middle">🔧 probe jual</text>
+    <text x="627" y="904" fill="#94a3b8" font-size="8" text-anchor="middle">→ trader.buy()</text>
+
+    <rect x="400" y="955" width="300" height="48" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="550" y="975" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">posisi tercatat (positions)</text>
+    <text x="550" y="991" fill="#94a3b8" font-size="8" text-anchor="middle">is_simulated 0/1 — satu tabel, satu Jejak</text>
+
+    <!-- ================= MONITOR ================= -->
+    <text x="750" y="190" fill="#34d399" font-size="11" font-weight="600">MONITOR POSISI — poll 3 dtk</text>
+
+    <rect x="750" y="205" width="320" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="910" y="234" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">engine.monitor_loop()</text>
+
+    <rect x="750" y="265" width="320" height="48" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="910" y="285" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">🔧 live_monitor_on=0 → skip riil</text>
+    <text x="910" y="301" fill="#94a3b8" font-size="8" text-anchor="middle">rem darurat: nol panggilan jaringan</text>
+
+    <rect x="750" y="325" width="320" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="910" y="345" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">pembersih zombie + time-stop</text>
+    <text x="910" y="361" fill="#94a3b8" font-size="8" text-anchor="middle">moonbag dual-guard (mati/hard-cap)</text>
+
+    <rect x="750" y="385" width="320" height="62" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="910" y="405" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">🔧 _check_all() — isolasi error</text>
+    <text x="910" y="421" fill="#94a3b8" font-size="8" text-anchor="middle">satu posisi error TIDAK membatalkan</text>
+    <text x="910" y="435" fill="#94a3b8" font-size="8" text-anchor="middle">pengecekan posisi lain di siklus itu</text>
+
+    <rect x="750" y="459" width="320" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="910" y="479" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">rug monitor (liq drop ≥ 40%)</text>
+    <text x="910" y="495" fill="#94a3b8" font-size="8" text-anchor="middle">diverifikasi quote on-chain dulu</text>
+
+    <rect x="750" y="519" width="320" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="910" y="539" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">PnL dari QUOTE ON-CHAIN</text>
+    <text x="910" y="555" fill="#94a3b8" font-size="8" text-anchor="middle">🔧 paper jujur: layar tidak dipakai</text>
+
+    <rect x="750" y="579" width="320" height="48" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="910" y="599" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">🔧 LP = 0 → RUG (SELALU dicek)</text>
+    <text x="910" y="615" fill="#fb7185" font-size="8" text-anchor="middle">dulu ter-skip saat quote melempar error</text>
+
+    <rect x="750" y="639" width="320" height="56" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="910" y="659" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">TP1 / TP2 / SL / trailing</text>
+    <text x="910" y="675" fill="#94a3b8" font-size="8" text-anchor="middle">→ engine.execute_sell()</text>
+    <text x="910" y="689" fill="#94a3b8" font-size="8" text-anchor="middle">lock per-posisi (anti double-sell)</text>
+
+    <!-- ================= EXIT ================= -->
+    <text x="1110" y="190" fill="#a78bfa" font-size="11" font-weight="600">EXIT — kegagalan dibatasi</text>
+
+    <rect x="1110" y="205" width="300" height="48" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="1260" y="234" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">execute_sell(pos, porsi, alasan)</text>
+
+    <rect x="1110" y="265" width="300" height="56" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="1260" y="285" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">SIMULASI → quote jual on-chain</text>
+    <text x="1260" y="301" fill="#94a3b8" font-size="8" text-anchor="middle">realized = hasil quote ÷ modal</text>
+    <text x="1260" y="315" fill="#fbbf24" font-size="8" text-anchor="middle">🔧 gagal → closed_unsellable</text>
+
+    <rect x="1110" y="333" width="300" height="56" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="1260" y="353" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">LIVE → approve / Permit2 → swap</text>
+    <text x="1260" y="369" fill="#94a3b8" font-size="8" text-anchor="middle">realized dari DELTA SALDO ETH</text>
+    <text x="1260" y="383" fill="#94a3b8" font-size="8" text-anchor="middle">bukan estimasi harga</text>
+
+    <rect x="1110" y="401" width="300" height="62" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="1260" y="421" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">🔧 panic exit (min_out=1)</text>
+    <text x="1260" y="437" fill="#94a3b8" font-size="8" text-anchor="middle">DILEWATI kalau revert permanen</text>
+    <text x="1260" y="451" fill="#94a3b8" font-size="8" text-anchor="middle">(freeze / blacklist / pause)</text>
+
+    <rect x="1110" y="475" width="300" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="1260" y="495" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">gagal 1–2 → peringatan</text>
+    <text x="1260" y="511" fill="#94a3b8" font-size="8" text-anchor="middle">posisi tetap terbuka, dicoba lagi</text>
+
+    <rect x="1110" y="535" width="300" height="62" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="1260" y="555" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">🔧 gagal ke-3 → closed_stuck</text>
+    <text x="1260" y="571" fill="#fb7185" font-size="8" text-anchor="middle">percobaan otomatis BERHENTI</text>
+    <text x="1260" y="585" fill="#94a3b8" font-size="8" text-anchor="middle">jual manual membuka &amp; reset penghitung</text>
+
+    <rect x="1110" y="609" width="300" height="56" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="1260" y="629" fill="#fff" font-size="10" font-weight="600" text-anchor="middle">status akhir posisi</text>
+    <text x="1260" y="645" fill="#94a3b8" font-size="8" text-anchor="middle">tp1 · tp2 · trail · sl · timeout</text>
+    <text x="1260" y="659" fill="#94a3b8" font-size="8" text-anchor="middle">inactive · rug · unsellable · stuck</text>
+
+    <!-- ================= OUTPUT ================= -->
+    <rect x="30" y="990" width="1400" height="110" rx="12" fill="rgba(251,191,36,.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+    <text x="42" y="1008" fill="#fbbf24" font-size="10" font-weight="600">OUTPUT</text>
+
+    <rect x="44" y="1018" width="452" height="66" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="270" y="1040" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Notifikasi Telegram</text>
+    <text x="270" y="1056" fill="#94a3b8" font-size="9" text-anchor="middle">admin: lengkap + tombol aksi</text>
+    <text x="270" y="1072" fill="#94a3b8" font-size="9" text-anchor="middle">channel publik: log disensor (tanpa saldo kas, tombol = URL)</text>
+
+    <rect x="508" y="1018" width="452" height="66" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="734" y="1040" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Rekap harian (jam 7 WIB)</text>
+    <text x="734" y="1056" fill="#94a3b8" font-size="9" text-anchor="middle">call · entry · TP2 · SL · rug · PnL realized</text>
+    <text x="734" y="1072" fill="#34d399" font-size="9" text-anchor="middle">🔧 + 🧊 tak bisa dijual / macet</text>
+
+    <rect x="972" y="1018" width="452" height="66" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="1198" y="1040" fill="#fff" font-size="11" font-weight="600" text-anchor="middle">Panel control bot</text>
+    <text x="1198" y="1056" fill="#94a3b8" font-size="9" text-anchor="middle">Posisi · Sources · Settings · Stats</text>
+    <text x="1198" y="1072" fill="#94a3b8" font-size="9" text-anchor="middle">Wallet · Insider · Finance · Radar Pons</text>
+
+    <!-- ================= LEGEND (outside all boundaries) ================= -->
+    <text x="44" y="1140" fill="#fff" font-size="10" font-weight="600">Legend</text>
+
+    <rect x="44" y="1152" width="16" height="10" rx="2" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1"/>
+    <text x="66" y="1161" fill="#94a3b8" font-size="8">Sumber sinyal / output</text>
+
+    <rect x="44" y="1170" width="16" height="10" rx="2" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1"/>
+    <text x="66" y="1179" fill="#94a3b8" font-size="8">Gerbang funnel &amp; monitor</text>
+
+    <rect x="44" y="1188" width="16" height="10" rx="2" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1"/>
+    <text x="66" y="1197" fill="#94a3b8" font-size="8">Keamanan / titik gagal</text>
+
+    <rect x="44" y="1206" width="16" height="10" rx="2" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1"/>
+    <text x="66" y="1215" fill="#94a3b8" font-size="8">Startup / paper trading</text>
+
+    <rect x="44" y="1224" width="16" height="10" rx="2" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1"/>
+    <text x="66" y="1233" fill="#94a3b8" font-size="8">Eksekusi / status posisi</text>
+
+    <text x="230" y="1161" fill="#fbbf24" font-size="8" font-weight="600">🔧 = diperbaiki / ditambahkan di sesi ini</text>
+    <text x="230" y="1179" fill="#94a3b8" font-size="8">garis putus-putus = batas blok (startup / output)</text>
+    <text x="230" y="1197" fill="#94a3b8" font-size="8">panah teal = jalur sinyal · ungu = jalur eksekusi</text>
+
+    <!-- status summary -->
+    <rect x="620" y="1132" width="810" height="112" rx="8" fill="rgba(76,29,149,.15)" stroke="#a78bfa" stroke-width="1" stroke-dasharray="4,4"/>
+    <text x="636" y="1152" fill="#a78bfa" font-size="9" font-weight="600">CARA BACA HASIL — status keluar posisi</text>
+    <text x="636" y="1172" fill="#34d399" font-size="8">✅ BISA DIEKSEKUSI : closed_tp1 · closed_tp2 · closed_trail</text>
+    <text x="636" y="1188" fill="#fbbf24" font-size="8">🛑 KELUAR TERPAKSA : closed_sl · closed_timeout · closed_inactive · closed_manual</text>
+    <text x="636" y="1204" fill="#fb7185" font-size="8">❌ TIDAK BISA KELUAR : closed_rug (LP ditarik) · closed_unsellable (quote gagal) · closed_stuck (3× gagal)</text>
+    <text x="636" y="1226" fill="#94a3b8" font-size="8">Metrik jujur = proporsi baris merah, bukan win rate.</text>
+  </svg>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-header"><div class="card-dot emerald"></div><h3>Perbaikan di sesi ini</h3></div>
+      <ul>
+        <li>• Circuit breaker: gagal 3× → closed_stuck, stop</li>
+        <li>• LP=0 selalu dicek (dulu ter-skip saat quote error)</li>
+        <li>• Paper jujur: tanpa fallback harga layar</li>
+        <li>• Probe jual sebelum beli (v4)</li>
+        <li>• Audit ABI fail-closed + lewat egress</li>
+        <li>• dev "tidak tahu" ≠ "aman"</li>
+        <li>• monitor: 1 error tidak membatalkan sisanya</li>
+        <li>• self-check source grup + auto-disable</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><div class="card-dot rose"></div><h3>Lubang yang MASIH terbuka</h3></div>
+      <ul>
+        <li>• Belum ada gate venue / allowlist launcher</li>
+        <li>• Sumber RPC masih bisa beli pool sembarangan</li>
+        <li>• Launcher scam menarik LP 0,5–2,1 dtk setelah beli</li>
+        <li>• Filter angka terbukti tidak memisahkan rug (0%)</li>
+        <li>• Pons belum jadi sumber beli (radar mati)</li>
+        <li>• Bot masih MATI — jangan nyalakan live dulu</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><div class="card-dot cyan"></div><h3>Saklar penting</h3></div>
+      <ul>
+        <li>• agent_dry_run=1 → paper (sekarang ON)</li>
+        <li>• live_monitor_on=0 → jangan sentuh posisi riil</li>
+        <li>• paper_honest=1 → akuntansi jujur</li>
+        <li>• sell_max_fail=3 → batas gagal jual</li>
+        <li>• prebuy_sell_probe=1 → probe sebelum beli</li>
+        <li>• buy_slippage=0.25 (dulu 0.60)</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="footer">hoodsniper v16 · Robinhood Chain 4663 · diagram alur setelah batch perbaikan · 45/45 test lulus</p>
+</div>
+</body>
+</html>

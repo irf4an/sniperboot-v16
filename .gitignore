@@ -14,7 +14,10 @@
 logs/
 *.log
 
-# Python cache & Tests
+# Python cache, venv & Tests
+myenv/
+venv/
+.venv/
 __pycache__/
 *.py[cod]
 *$py.class

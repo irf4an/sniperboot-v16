@@ -232,14 +232,22 @@ def _total_supply(trader, ca: str) -> int:
     return c.functions.totalSupply().call()
 
 
-def dev_pct(trader, ca: str) -> float:
-    """% supply yang dipegang deployer. 0 kalau deployer tidak ketemu."""
+def dev_pct(trader, ca: str):
+    """% supply yang dipegang deployer — atau None kalau TIDAK DIKETAHUI.
+
+    None ≠ 0. Dulu deployer yang tidak ketemu mengembalikan 0.0, dan di
+    filter itu terbaca sebagai "dev tidak pegang apa-apa" alias AMAN —
+    padahal artinya datanya tidak ada. None memaksa pemanggil memilih
+    fail-closed. Deployer yang alamatnya memang DEAD tetap 0.0.
+    """
     dev = creator_of(ca)
-    if not dev or dev.lower() in DEAD:
+    if not dev:
+        return None
+    if dev.lower() in DEAD:
         return 0.0
     ts = _total_supply(trader, ca)
     if ts <= 0:
-        return 0.0
+        return None
     bal = trader.erc20(ca).functions.balanceOf(Web3.to_checksum_address(dev)).call()
     return bal / ts * 100
 
@@ -479,11 +487,13 @@ def audit_contract(trader, ca: str) -> tuple[bool, str]:
         return False, f"kontrak memiliki signature berbahaya ({detected[0]})"
 
     # ---- B. ABI source terverifikasi via Blockscout ----
+    # Lewat rantai egress yang sama dengan cek holder (direct → Worker →
+    # jina). Dulu memanggil endpoint langsung, dan karena Cloudflare
+    # memberi managed-challenge ke IP VPS ini, jalur itu SELALU gagal →
+    # audit ABI praktis tidak pernah berjalan.
     try:
-        r = _S.get(f"{config.BLOCKSCOUT_API}/smart-contracts/{ca}", timeout=3.5)
-        r.raise_for_status()
-        sc = r.json()
-        abi = sc.get("abi")
+        sc = _get(f"/smart-contracts/{ca}")
+        abi = (sc or {}).get("abi")
         if not isinstance(abi, list):
             return True, "bytecode clean (source tidak terverifikasi)"
         keywords = ("blacklist", "freeze", "locktrading", "pausetrading",
@@ -500,8 +510,12 @@ def audit_contract(trader, ca: str) -> tuple[bool, str]:
                     if kw in nm:
                         return False, f"kontrak terverifikasi memuat fungsi berbahaya '{item.get('name')}'"
         return True, "bytecode clean · abi clean"
-    except Exception:
-        # timeout / error / unverified → fallback ke hasil lapis A (clean)
+    except Exception as e:
+        # Kebijakan sama dengan cek holder: kalau data tidak bisa diverifikasi
+        # dan operator memilih fail-closed, JANGAN lolos diam-diam.
+        if float(db.get("safety_fail_closed") or 0) == 1:
+            return False, (f"audit kontrak tidak lengkap — ABI tidak terbaca "
+                           f"({e.__class__.__name__})")
         return True, "bytecode clean (Blockscout tidak terjangkau)"
 
 
@@ -566,8 +580,10 @@ def check(trader, ca: str, pair) -> tuple[bool, str]:
     try:
         dp = dev_pct(trader, ca)
     except Exception:
-        dp, dev_failed = -1.0, True
-    if not dev_failed and dp > max_dev:
+        dp, dev_failed = None, True
+    if dp is None:
+        dev_failed = True          # "tidak tahu" BUKAN "aman"
+    elif dp > max_dev:
         return False, f"dev pegang {dp:.1f}% supply (max {max_dev:.0f}%)"
 
     # ---- top-10 concentration ----

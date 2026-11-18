@@ -147,6 +147,12 @@ def test_empty_code_rejected():
 # 5. Bonus: Blockscout timeout → fallback bytecode (tetap clean)
 # =========================================================
 def test_blockscout_timeout_falls_back():
+    """Kebijakan baru: ABI tidak terbaca = fail-CLOSED by default.
+
+    Dulu selalu fail-open ("bytecode clean"), jadi lapisan audit ABI tidak
+    pernah benar-benar berjalan. Sekarang perilakunya mengikuti setting
+    safety_fail_closed yang sama dengan cek holder/dev.
+    """
     path, old = _burn_db()
     try:
         code = bytes.fromhex("6080604052348015605f76005b") * 10
@@ -154,10 +160,18 @@ def test_blockscout_timeout_falls_back():
         def _boom(*a, **kw):
             raise TimeoutError("timeout")
 
-        with patch.object(safety._S, "get", side_effect=_boom, create=True):
+        # 1) default (safety_fail_closed=1) → TOLAK
+        with patch.object(safety, "_get", side_effect=_boom, create=True):
             ok, msg = audit_contract(_FakeTrader(code), "0x" + "f" * 40)
-        assert ok, f"fallback harus lolos: {msg}"
-        assert "Blockscout" in msg, msg
+        assert not ok, f"fail-closed harus menolak: {msg}"
+        assert "ABI tidak terbaca" in msg, msg
+
+        # 2) operator memilih fail-open → lolos dengan catatan
+        db.set_("safety_fail_closed", "0")
+        with patch.object(safety, "_get", side_effect=_boom, create=True):
+            ok2, msg2 = audit_contract(_FakeTrader(code), "0x" + "f" * 40)
+        assert ok2, f"fail-open harus lolos: {msg2}"
+        assert "Blockscout" in msg2, msg2
     finally:
         config.DB_PATH = old
 

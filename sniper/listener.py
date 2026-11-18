@@ -284,6 +284,58 @@ def register(user_client=None, trader=None, notify=None, public_notify=None):
             traceback.print_exc()
 
 
+# ---------- startup self-check source Telegram ----------
+async def verify_sources(user_client, auto_disable=True, timeout=15):
+    """Cek tiap source Telegram masih bisa diakses akun userbot.
+
+    Return list dict {id, name, chat_id, ok, err, disabled}. Source yang
+    entity-nya tidak bisa diakses (akun sudah keluar/di-kick) dimatikan
+    otomatis supaya tidak jadi mubazir diam-diam — dulu kasusnya: grup
+    "Robinhood Degen Room" sudah tidak bisa diakses tapi masih terdaftar,
+    jadi crawling seolah "hilang" tanpa pesan apa pun.
+    """
+    out = []
+    if user_client is None:
+        return out
+    for s in db.sources(only_enabled=False):
+        cid = s.get("chat_id") or 0
+        if not cid:                       # 0 = source sintetis (SCANNER)
+            continue
+        row = {"id": s["id"], "name": s["name"], "chat_id": cid,
+               "ok": False, "err": "", "disabled": False}
+        try:
+            await asyncio.wait_for(user_client.get_entity(int(cid)), timeout=timeout)
+            row["ok"] = True
+        except Exception as e:
+            row["err"] = f"{type(e).__name__}: {str(e)[:90]}"
+            if auto_disable and s.get("enabled"):
+                try:
+                    db.set_source_enabled(s["id"], 0)
+                    row["disabled"] = True
+                except Exception:
+                    pass
+        out.append(row)
+    return out
+
+
+def sources_report(rows) -> str:
+    """Teks laporan startup source untuk admin."""
+    if not rows:
+        return ("🔎 **Sumber Telegram** — tidak ada source grup terdaftar.\n"
+                "_Sinyal hanya dari sumber non-Telegram._")
+    ok = [r for r in rows if r["ok"]]
+    dead = [r for r in rows if not r["ok"]]
+    lines = [f"🔎 **Startup check source Telegram** — "
+             f"{len(ok)} hidup, {len(dead)} mati"]
+    for r in rows:
+        if r["ok"]:
+            lines.append(f"✅ {r['name']}")
+        else:
+            lines.append(f"❌ {r['name']} — {r['err']}"
+                         + (" _(dimatikan otomatis)_" if r["disabled"] else ""))
+    return "\n".join(lines)
+
+
 async def _handle(event, src):
     if db.paused():
         return
@@ -856,7 +908,7 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
                # family key oleh clone_guard.note_entry().
                "name": (pair.get("baseToken") or {}).get("name", ""),
                "pair_address": pair["pairAddress"], "chain_slug": pair["chainId"],
-               "pool_type": dx.pool_type(pair), "fee": 3000,
+               "pool_type": ptype_dx, "fee": fee_dx,
                "entry_price_usd": entry_price_usd,
                "tokens_total": tokens_total, "tokens_left": tokens_total,
                "eth_spent": eth_spent, "usd_spent": buy_usd,
@@ -877,8 +929,8 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
                 f"saldo_virtual_kurang (kas ${db.get_paper_cash():.2f} < "
                 f"${total_buy_cost:.2f} = modal ${buy_usd_final:.2f} + gas ${gas_usd:.2f}) "
                 f"— kas virtual tidak cukup.")
-            return (False, f"saldo_virtual_kurang (kas "
-                           f"${db.get_paper_cash():.2f} < ${total_buy_cost:.2f})")
+            return (f"buy_failed:saldo_virtual_kurang (kas "
+                    f"${db.get_paper_cash():.2f} < ${total_buy_cost:.2f})")
         db.open_position(**pos)
         try:
             pid = max(p["id"] for p in db.open_positions() if p["ca"] == pos["ca"] and p["is_simulated"])

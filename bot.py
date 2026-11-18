@@ -184,6 +184,21 @@ async def main():
 
     engine.bind(trader, notify, public_notify=public_notify)
     listener.register(user, trader, notify, public_notify=public_notify)
+
+    # ---------- 🔎 startup self-check source Telegram ----------
+    # Crawling grup tidak boleh mati senyap: kalau sesi userbot hilang atau
+    # akun sudah keluar dari grup, admin harus TAHU dari notifikasi, bukan
+    # dari "kok nggak ada sinyal grup lagi".
+    if user is not None:
+        try:
+            rows = await listener.verify_sources(user)
+            await notify(listener.sources_report(rows))
+        except Exception as e:
+            print(f"[startup-check] {e}")
+            await notify(f"⚠️ Startup check source GAGAL: {e}")
+    else:
+        await notify("⚠️ **Userbot Telegram NON-AKTIF** — crawling grup TIDAK "
+                     "berjalan. Sinyal hanya dari scanner/tracker on-chain.")
     control_bot.register(bot, trader, user)
     asyncio.create_task(engine.monitor_loop())
     # engine.agent_review_loop dinonaktifkan (Tangan dipensiunkan; exit 100% deterministik on-chain)

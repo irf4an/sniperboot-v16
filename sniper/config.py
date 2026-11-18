@@ -87,11 +87,44 @@ SETTING_DEFAULTS = {
     "tp2_on":         "1",
     "recap_on":       "1",
     "recap_hour":     "7",
-    "buy_slippage":   "0.60",
+    # 📉 Toleransi slippage beli. Dulu 0.60 (60%!) — di pool tipis itu
+    # hampir seluruh nilai posisi bisa diambil bandar/sandwich sebelum
+    # transaksi lu mendarat. 0.25 = kompromi: masih lolos di pool yang
+    # bergerak, tapi tidak lagi jadi mangsa gratis. Naikkan lagi lewat
+    # panel Settings kalau koin runner lu banyak kena revert.
+    "buy_slippage":   "0.25",
     "sell_slippage":  "0.35",
     "min_liq_usd":    "500",
     "poll_seconds":   "3",
     "max_hold_sec":   "240",
+    # ---- 🧊 Circuit breaker jual (anti loop gagal) ----
+    # Token yang di-freeze dev tidak akan pernah bisa dijual. Dulu
+    # kegagalan jual dibiarkan mengulang tiap poll (3 dtk) SELAMANYA:
+    # terukur 1.481 percobaan untuk 7 posisi dalam ~6 jam + spam
+    # notifikasi Telegram tiap 3 detik. Setelah N gagal berturut,
+    # posisi ditandai `closed_stuck` dan percobaan otomatis berhenti
+    # sampai operator menekan jual manual (yang me-reset penghitung).
+    "sell_max_fail":  "3",
+    # ---- 🛑 Rem darurat monitor posisi RIIL ----
+    # 0 = engine TIDAK menyentuh posisi nyata sama sekali (posisi riil
+    # dibiarkan apa adanya; tidak ada percobaan jual/approve). Posisi
+    # simulasi tetap diproses. Berguna saat mode latihan dinyalakan
+    # tapi masih ada posisi live yang menggantung.
+    "live_monitor_on": "1",
+    # ---- 🧊 Probe jual on-chain SEBELUM beli (v4) ----
+    # Quoter diminta menjual balik jumlah token yang akan kita terima.
+    # Kalau pool me-revert saat arah jual (freeze/blacklist/hook
+    # pemblokir), BUY DIBATALKAN. Dulu pagar ini tidak ada untuk v4:
+    # honeypot baru ketahuan setelah uang masuk.
+    "prebuy_sell_probe": "1",
+    # ---- 🧪 AKUNTANSI PAPER JUJUR ----
+    # 1 (default) = posisi simulasi hanya dihargai dari harga yang BISA
+    # DIEKSEKUSI (quote jual on-chain). Kalau quote gagal/0, hasil jual
+    # TIDAK DIKARANG dari harga layar Dexscreener — posisi langsung
+    # ditandai `closed_unsellable` (realized 0 = -100%), dan TP/SL tidak
+    # dipicu dari harga layar. 0 = perilaku lama (fallback harga layar,
+    # yang membuat rekor paper tampak 81% menang padahal live-nya rug).
+    "paper_honest": "1",
     # ---- 🌙 Moonbag dual-guard (v16.7) ----
     # inactivity: 7 menit tanpa transaksi (Dexscreener txns.m5 = 0) ATAU
     # quote jual on-chain = 0 → EXIT INACTIVE.
@@ -252,7 +285,11 @@ SETTING_LABELS = {
     "sell_slippage": "📉 Slippage sell",
     "min_liq_usd":   "💧 Min liquidity (USD)",
     "poll_seconds":  "⏱ Interval cek harga (dtk)",
-    "max_hold_sec":  "⏱ Batas max hold posisi (detik, misal 420 = 7m, 0=off)",
+    "max_hold_sec":   "⏱ Batas max hold posisi (detik, misal 420 = 7m, 0=off)",
+    "sell_max_fail":  "🧊 Circuit breaker: maks gagal jual berturut sebelum posisi ditandai macet (3)",
+    "live_monitor_on": "🛑 Monitor posisi RIIL (1=on, 0=rem darurat: posisi nyata tidak disentuh sama sekali)",
+    "prebuy_sell_probe": "🧊 Probe jual on-chain sebelum beli v4 (1=on: tolak koin yang pool-nya menolak jual)",
+    "paper_honest": "🧪 Akuntansi paper jujur (1=on: hanya harga yang bisa dieksekusi, tanpa fallback harga layar)",
     "moonbag_inactivity_sec": "⏱ Moonbag: batas volume mati (detik, 0 txns m5 → EXIT INACTIVE, 420 = 7m)",
     "vanity7777_enabled":      "🎭 Aturan khusus CA ...7777 aktif (1/0, default 0 — data tidak mendukung)",
     "vanity7777_max_hold_sec": "🎭 Time-stop khusus CA ...7777 (detik, dipakai hanya jika vanity7777_enabled=1)",

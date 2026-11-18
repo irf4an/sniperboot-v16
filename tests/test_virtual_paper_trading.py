@@ -40,6 +40,10 @@ def check(name, cond, detail=""):
 # ======================================================================
 print("\n[1] staleness drift guard")
 db.init()
+# Tes ini menguji alur posisi simulasi + staleness, bukan akuntansi harga:
+# pakai mode pricing lama (paper_honest=0). Akuntansi jujur diuji di
+# test_sell_circuit_breaker.py bagian [6].
+db.set_("paper_honest", "0")
 
 check("drift +49% tidak stale",
       not agent.check_staleness(1.0, 1.49, 0.50))

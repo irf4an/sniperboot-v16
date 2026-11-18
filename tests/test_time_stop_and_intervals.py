@@ -30,7 +30,10 @@ class FakeDB:
     """db minimal untuk engine._check / _execute_sell_locked."""
 
     def __init__(self, settings=None, pos=None):
-        self.settings = settings or {}
+        # Tes ini menguji aturan time-stop, bukan akuntansi harga: pakai
+        # mode pricing lama (paper_honest=0).
+        self.settings = {"paper_honest": "0"}
+        self.settings.update(settings or {})
         self.updates = []          # (fields_dict) per update_position
         self.pos = pos or _make_pos()
 
