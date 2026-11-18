@@ -127,7 +127,15 @@ def test_window_filter():
 
 def test_panel_caption_says_breadth():
     from sniper import control_bot
-    text, _buttons = control_bot.insider_buys_panel(window_sec=3600)
+    path, old = _fresh_db()
+    try:
+        now = int(time.time())
+        db.record_insider_buy(CROWD, wallet=_w(201), symbol="X", ts=now - 30)
+        db.record_insider_buy(CROWD, wallet=_w(202), symbol="X", ts=now - 20)
+        text, _buttons = control_bot.insider_buys_panel(window_sec=3600)
+    finally:
+        os.unlink(path)
+        config.DB_PATH = old
     assert "dompet unik" in text, text[:400]
     assert "paling sering dibeli" not in text
     print("PASS caption panel menyebut urutan dompet unik")

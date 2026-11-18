@@ -180,6 +180,29 @@ def base_score(symbol, name, deployer_launches=0, name_cluster=0) -> tuple:
     return max(0, min(100, score)), "; ".join(notes)
 
 
+def _fmt_quote(v) -> str:
+    """Format angka quote asset tanpa mengarang satuan.
+
+    Skala Pons liar: 3.37 ETH, 19.7 AAPL, 7.850 USDG, 173.872 ORBIO. Jadi
+    pakai presisi adaptif, bukan format tetap 2 desimal.
+    """
+    if v is None:
+        return "?"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "?"
+    if f <= 0:
+        return "0"
+    if f >= 1000:
+        return f"{f:,.0f}"
+    if f >= 100:
+        return f"{f:,.1f}"
+    if f >= 1:
+        return f"{f:,.2f}".rstrip("0").rstrip(".")
+    return f"{f:.4f}".rstrip("0").rstrip(".")
+
+
 def compose_alert(rec: dict) -> str:
     """Susun teks alert Telegram dari satu record kandidat.
 
@@ -211,8 +234,18 @@ def compose_alert(rec: dict) -> str:
 
     if prog is not None and float(prog) > 0:
         pct = round(float(prog) * 100, 1)
-        r_str = f"{float(raised):.2f}" if raised is not None else "?"
-        lines.append(f"🔥 Kurva **{pct}%** ({r_str}/4.2 ETH)")
+        # raisedQuote/thresholdQuote bersatuan quote asset launch — bisa ETH,
+        # stablecoin, atau token equity (AAPL/NVDA/HIMS/...). Jangan hardcode ETH.
+        q_sym = str(rec.get("quote_symbol") or "").strip()
+        thr = rec.get("threshold_quote") or 0.0
+        raised_usd = rec.get("raised_usd") or 0.0
+        r_str = _fmt_quote(raised)
+        t_str = _fmt_quote(thr) if float(thr or 0) > 0 else "?"
+        unit = q_sym or ("?" if t_str == "?" else "ETH")
+        curve_line = f"🔥 Kurva **{pct}%** ({r_str}/{t_str} {unit})"
+        if float(raised_usd or 0) > 0:
+            curve_line += f" · ${float(raised_usd):,.0f}"
+        lines.append(curve_line)
     if vol or trades or mcap:
         m_parts = []
         if vol:
@@ -331,13 +364,23 @@ def scan_curve_progress() -> int:
             mcap = float(item.get("marketCapUsd") or 0.0)
             tax = int(item.get("creatorTaxBps") or 0)
             socials = json.dumps(item.get("socials") or {})
+            # raisedQuote/thresholdQuote selalu dalam satuan quote asset launch
+            # (ETH native, stablecoin, atau token equity). Simpan satuannya,
+            # jangan diasumsikan ETH.
+            quote = item.get("quote") or {}
+            quote_symbol = str(quote.get("symbol") or "")[:24]
+            quote_asset_class = str(quote.get("assetClass") or "")[:16]
+            threshold_quote = float(item.get("thresholdQuote") or 0.0)
+            raised_usd = float(item.get("raisedUsd") or 0.0)
 
             if db.upsert_pons_curve_candidate(
                 ca=ca, deployer=deployer, curve=curve, launch_block=launch_block,
                 launch_ts=created_at, symbol=symbol, name=name,
                 total_supply=total_supply, progress=prog, volume_usd=vol,
                 trade_count=trades, market_cap_usd=mcap, raised_eth=raised,
-                creator_tax_bps=tax, socials=socials
+                creator_tax_bps=tax, socials=socials,
+                quote_symbol=quote_symbol, quote_asset_class=quote_asset_class,
+                threshold_quote=threshold_quote, raised_usd=raised_usd
             ):
                 new_count += 1
         except Exception as e:
@@ -449,7 +492,12 @@ def llm_verdict(rec: dict) -> dict:
     if rec.get("progress") is not None:
         payload["curve_progress_pct"] = round(float(rec["progress"]) * 100, 1)
     if rec.get("raised_eth") is not None:
-        payload["raised_eth"] = round(float(rec["raised_eth"]), 2)
+        payload["raised_quote"] = round(float(rec["raised_eth"]), 2)
+        payload["raised_quote_unit"] = str(rec.get("quote_symbol") or "?")
+    if rec.get("threshold_quote"):
+        payload["threshold_quote"] = round(float(rec["threshold_quote"]), 2)
+    if rec.get("raised_usd"):
+        payload["raised_usd"] = round(float(rec["raised_usd"]), 2)
     if rec.get("volume_usd") is not None:
         payload["volume_usd"] = round(float(rec["volume_usd"]))
     if rec.get("trade_count") is not None:

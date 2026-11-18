@@ -9,6 +9,10 @@
 *.db
 *.sqlite
 *.sqlite3
+# File pendamping SQLite WAL — jangan pernah masuk repo (isinya data live)
+*.db-wal
+*.db-shm
+*.db-journal
 
 # Logs
 logs/
@@ -30,3 +34,5 @@ htmlcov/
 *.tmp
 hoodsniper.db.bak*
 hoodsniper.db.archive-*
+# Snapshot dari tools/backup_db.py
+backups/

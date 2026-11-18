@@ -4,6 +4,9 @@ import time
 from . import config
 
 _lock = threading.Lock()
+# Detik koneksi mengantre kalau writer lain sedang memegang lock. Default
+# Python 5 detik terlalu pendek untuk skema delete-journal di DB 36 MB.
+DB_TIMEOUT = 30.0
 _src_cache = {"ts": 0, "rows": []}
 
 # ---------- 🚫 Alamat yang BUKAN dompet trader ----------
@@ -39,14 +42,92 @@ def is_trackable_wallet(address) -> bool:
     return True
 
 
+_local = threading.local()
+
+
 def _conn():
-    c = sqlite3.connect(config.DB_PATH)
+    """Koneksi per-thread yang dipakai ulang.
+
+    Sebelumnya tiap operasi membuka koneksi baru lalu TIDAK pernah menutupnya
+    (pola `with sqlite3.connect(...)` hanya commit, bukan close). Hasil ukur:
+    69 file descriptor untuk satu file DB dan `database is locked` di log.
+
+    Sekarang satu koneksi per thread, dibuka sekali, dipakai ulang. Jumlah
+    thread dibatasi ThreadPoolExecutor, jadi koneksi juga terbatas. Kalau
+    DB_PATH berubah (dipakai test), koneksi lama ditutup dan diganti.
+    """
+    c = getattr(_local, "c", None)
+    if c is not None and getattr(_local, "path", None) == config.DB_PATH:
+        return c
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+    c = sqlite3.connect(config.DB_PATH, timeout=DB_TIMEOUT)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA busy_timeout=%d" % int(DB_TIMEOUT * 1000))
+    # Per-connection, bukan global: tanpa ini tiap koneksi balik ke FULL dan
+    # biaya fsync di WAL jadi 2x lebih mahal dari yang perlu.
+    c.execute("PRAGMA synchronous=NORMAL")
+    _local.c = c
+    _local.path = config.DB_PATH
     return c
 
 
+class _ConnCM:
+    """Context manager: commit/rollback transaksi, koneksi tetap hidup.
+
+    Koneksi sengaja TIDAK ditutup supaya bisa dipakai ulang thread yang sama.
+    Yang penting bukan menutup, tapi tidak lagi membocorkan koneksi baru per
+    operasi (penyebab lock contention sebelumnya).
+    """
+
+    __slots__ = ("_c",)
+
+    def __enter__(self):
+        self._c = _conn()
+        return self._c
+
+    def __exit__(self, exc_type, exc, tb):
+        c = self._c
+        if exc_type is None:
+            c.commit()
+        else:
+            c.rollback()
+        return False
+
+
+def _conn_cm():
+    return _ConnCM()
+
+
+def close_thread_conn():
+    """Tutup koneksi milik thread ini (dipakai saat shutdown/test)."""
+    c = getattr(_local, "c", None)
+    if c is not None:
+        try:
+            c.close()
+        except Exception:
+            pass
+        _local.c = None
+        _local.path = None
+
+
 def init():
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
+        # WAL: reader tidak lagi memblokir writer dan sebaliknya. Dengan
+        # journal_mode=delete (default), tiap commit mengunci SELURUH file,
+        # jadi pembacaan di thread lain langsung kena "database is locked".
+        # WAL persisten di file DB — cukup diset sekali.
+        try:
+            cur = c.execute("PRAGMA journal_mode=WAL").fetchone()
+            print(f"[db] journal_mode={cur[0]}")
+        except sqlite3.OperationalError as e:
+            print(f"[db] gagal set WAL (lanjut mode lama): {e}")
+        # NORMAL aman untuk WAL: commit tetap atomic, hanya kehilangan
+        # durability saat OS crash (bukan saat aplikasi crash).
+        c.execute("PRAGMA synchronous=NORMAL")
         c.execute("""CREATE TABLE IF NOT EXISTS settings(
             key TEXT PRIMARY KEY, value TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS sources(
@@ -118,7 +199,11 @@ def init():
             llm_model TEXT,
             checked_at INTEGER,
             alerted_at INTEGER,
-            block_buy INTEGER DEFAULT 0)""")
+            block_buy INTEGER DEFAULT 0,
+            quote_symbol TEXT DEFAULT '',
+            quote_asset_class TEXT DEFAULT '',
+            threshold_quote REAL DEFAULT 0.0,
+            raised_usd REAL DEFAULT 0.0)""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_status ON pons_queue(status)")
         # Migrasi aditif: DB yang dibuat sebelum kolom `block_buy` & curve metrics ada.
         cols = {r["name"] for r in c.execute("PRAGMA table_info(pons_queue)")}
@@ -133,20 +218,37 @@ def init():
             "creator_tax_bps": "INTEGER DEFAULT 0",
             "socials": "TEXT DEFAULT ''",
             "queued_at": "INTEGER DEFAULT 0",
+            # Satuan kurva: raisedQuote/thresholdQuote selalu dalam satuan
+            # quote asset launch (ETH native, stablecoin, atau token equity).
+            # Tanpa kolom ini angka raised tidak bisa dibaca setelah masuk DB.
+            "quote_symbol": "TEXT DEFAULT ''",
+            "quote_asset_class": "TEXT DEFAULT ''",
+            "threshold_quote": "REAL DEFAULT 0.0",
+            "raised_usd": "REAL DEFAULT 0.0",
         }
         for col_name, col_def in curve_cols.items():
             if col_name not in cols:
                 c.execute(f"ALTER TABLE pons_queue ADD COLUMN {col_name} {col_def}")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_launch_ts ON pons_queue(launch_ts)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_pons_progress ON pons_queue(progress)")
+        # Cache provenance: CA ini lahir dari factory Pons atau bukan.
+        # Dipakai bypass gate top10 (lihat sniper/pons_origin.py).
+        c.execute("""CREATE TABLE IF NOT EXISTS pons_origin(
+            ca TEXT PRIMARY KEY,
+            is_pons INTEGER DEFAULT 0,
+            checked_at INTEGER DEFAULT 0)""")
         for k, v in config.SETTING_DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
-        # v16.5 (Solusi B): migrasi DB lama — longgarkan slippage anchor
-        # Dexscreener 0.30 → 0.60 + percepat siklus scanner 15 → 5 detik.
-        # ON CONFLICT DO UPDATE hanya kalau nilai masih default lama.
-        for _k, _old, _new in (("buy_slippage", "0.30", "0.25"),
-                               ("buy_slippage", "0.60", "0.25"),
-                               ("scanner_interval_sec", "15", "5")):
+        # v16.5: percepat siklus scanner 15 → 5 detik.
+        #
+        # ⚠️ buy_slippage SENGAJA TIDAK dimigrasi otomatis.
+        # Versi PR mengubah default 0.60 → 0.25 lewat migrasi senyap. Itu
+        # mengubah perilaku beli (toleransi slippage = risiko modal) tanpa
+        # persetujuan operator, dan di DB yang nilainya sudah 0.60 efeknya
+        # langsung terasa begitu bot restart. Default di SETTING_DEFAULTS
+        # tetap 0.25 untuk instalasi baru; DB lama dipertahankan apa adanya
+        # sampai operator mengubahnya sendiri lewat panel Settings.
+        for _k, _old, _new in (("scanner_interval_sec", "15", "5"),):
             c.execute("UPDATE settings SET value=:new "
                       "WHERE key=:k AND value=:old",
                       {"k": _k, "old": _old, "new": _new})
@@ -164,14 +266,14 @@ def init():
 
 # ---------- settings ----------
 def get(key, cast=float):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     v = r["value"] if r else config.SETTING_DEFAULTS.get(key, "0")
     return cast(v)
 
 
 def set_(key, value):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
@@ -221,7 +323,7 @@ def _invalidate():
 def sources(only_enabled=False):
     now = time.time()
     if now - _src_cache["ts"] > 5:
-        with _lock, _conn() as c:
+        with _lock, _conn_cm() as c:
             _src_cache["rows"] = [dict(r) for r in c.execute("SELECT * FROM sources ORDER BY id")]
         _src_cache["ts"] = now
     rows = _src_cache["rows"]
@@ -237,7 +339,7 @@ def match_source(chat_id: int, topic_id: int):
 
 
 def add_source(chat_id, topic_id, name, mcap_max):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("INSERT INTO sources(chat_id,topic_id,name,mcap_max) VALUES(?,?,?,?)",
                   (chat_id, topic_id, name, mcap_max))
     _invalidate()
@@ -251,20 +353,20 @@ def set_source_enabled(sid, enabled):
 
 
 def toggle_source(sid):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("UPDATE sources SET enabled = 1 - enabled WHERE id=?", (sid,))
     _invalidate()
 
 
 def del_source(sid):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("DELETE FROM sources WHERE id=?", (sid,))
     _invalidate()
 
 
 # ---------- calls / dedupe ----------
 def seen_call(ca):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return c.execute("SELECT 1 FROM calls WHERE ca=?", (ca.lower(),)).fetchone() is not None
 
 
@@ -274,12 +376,12 @@ def touch_call(ca):
     Dipakai jalur retry antrean pending: CA yang gagal gate boleh dievaluasi
     ulang, tapi dedup jangka panjang tetap berlaku begitu keluar antrean.
     """
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("UPDATE calls SET ts=? WHERE ca=?", (int(time.time()), ca.lower()))
 
 
 def record_call(ca, source_id, sender_id=None, sender_name=None):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("INSERT OR IGNORE INTO calls(ca,source_id,sender_id,sender_name,ts) VALUES(?,?,?,?,?)",
                   (ca.lower(), source_id, sender_id, sender_name, int(time.time())))
 
@@ -290,7 +392,7 @@ def open_position(**kw):
     kw.setdefault("caller_name", None)
     kw.setdefault("buy_tx", None)
     kw.setdefault("is_simulated", 0)
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("""INSERT INTO positions
             (ca,symbol,pair_address,chain_slug,pool_type,fee,entry_price_usd,
              tokens_total,tokens_left,eth_spent,usd_spent,honeypot,source_name,
@@ -310,30 +412,50 @@ def open_position(**kw):
 
 
 def open_positions():
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return [dict(r) for r in c.execute("SELECT * FROM positions WHERE status='open'")]
 
 
+def stuck_positions(limit=10):
+    """Posisi yang dihentikan circuit breaker (`closed_stuck`).
+
+    Posisi ini TIDAK lagi `open` sehingga tidak muncul di panel Posisi, tapi
+    tokennya masih bisa ada di wallet. Tanpa daftar ini operator tidak punya
+    jalan memicu ulang penjualan — janji "tekan jual manual" di notifikasi
+    macet jadi mustahil dijalankan. Posisi `closed_unsellable` sengaja tidak
+    ikut: tokennya sudah dianggap hangus (rugi penuh) dan tidak layak
+    ditawarkan untuk dijual lagi.
+    """
+    try:
+        lim = max(int(limit), 1)
+    except (TypeError, ValueError):
+        lim = 10
+    with _lock, _conn_cm() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM positions WHERE status='closed_stuck' "
+            "ORDER BY closed_at DESC, id DESC LIMIT ?", (lim,))]
+
+
 def position(pid):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         r = c.execute("SELECT * FROM positions WHERE id=?", (pid,)).fetchone()
         return dict(r) if r else None
 
 
 def update_position(pid, **fields):
     sets = ",".join(f"{k}=?" for k in fields)
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute(f"UPDATE positions SET {sets} WHERE id=?", (*fields.values(), pid))
 
 
 def add_realized(pid, eth_out):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("UPDATE positions SET realized_eth = realized_eth + ? WHERE id=?", (eth_out, pid))
 
 
 def reset_stats(pos_id=None, call_rowid=None):
     """Set baseline offset ID untuk perhitungan statistik tanpa menghapus riwayat DB."""
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         if pos_id is None:
             pos_id = c.execute("SELECT COALESCE(MAX(id), 0) FROM positions").fetchone()[0]
         if call_rowid is None:
@@ -348,7 +470,7 @@ def reset_stats(pos_id=None, call_rowid=None):
 
 
 def stats():
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         row = lambda q: c.execute(q).fetchone()[0]
         get_val = lambda k: (c.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone() or [None])[0]
         try:
@@ -387,7 +509,7 @@ def stats():
 
 # ---------- agent: decisions & lessons ----------
 def log_decision(**kw):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("""INSERT INTO decisions(ca,symbol,role,action,conviction,size_mult,reason,risks,ts)
             VALUES(:ca,:symbol,:role,:action,:conviction,:size_mult,:reason,:risks,:ts)""",
             {**kw, "ts": int(time.time())})
@@ -398,24 +520,24 @@ def recent_decisions(n=5, role=None):
     if role:
         q += f" WHERE role='{role}'"
     q += " ORDER BY id DESC LIMIT ?"
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return [dict(r) for r in c.execute(q, (n,))]
 
 
 def mark_decision_outcome(ca, outcome):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("""UPDATE decisions SET outcome=? WHERE id=(
             SELECT id FROM decisions WHERE ca=? AND role='screener' ORDER BY id DESC LIMIT 1)""",
             (outcome, ca.lower()))
 
 
 def add_lesson(text):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("INSERT INTO lessons(text,ts) VALUES(?,?)", (text, int(time.time())))
 
 
 def recent_lessons(n=5):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return [dict(r) for r in c.execute("SELECT * FROM lessons ORDER BY id DESC LIMIT ?", (n,))]
 
 
@@ -426,13 +548,13 @@ def count_closed():
     tabel positions supaya tidak bergantung pada penjumlahan stats() yang
     gampang dobel-hitung (tp2_done vs status).
     """
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return c.execute(
             "SELECT COUNT(*) FROM positions WHERE status LIKE 'closed%'").fetchone()[0]
 
 
 def closed_positions_with_decisions(n=20):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         rows = c.execute("""SELECT p.symbol, p.status, p.usd_spent, p.realized_eth,
             p.eth_spent, p.tp1_done, p.source_name,
             (SELECT reason FROM decisions d WHERE d.ca=p.ca AND d.role='screener'
@@ -448,7 +570,7 @@ def closed_positions_with_decisions(n=20):
 def caller_stats(caller_id):
     if not caller_id:
         return None
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         r = c.execute("""SELECT COUNT(*) AS calls_bought,
             SUM(status='closed_tp2') AS full_tp,
             SUM(tp1_done) AS hit_tp1,
@@ -458,7 +580,7 @@ def caller_stats(caller_id):
 
 
 def top_callers(n=10):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         rows = c.execute("""SELECT caller_name,
             COUNT(*) AS buys,
             SUM(tp1_done) AS hit_tp1,
@@ -474,7 +596,7 @@ def top_callers(n=10):
 
 # ---------- rekap harian ----------
 def recap_data(since_ts: int):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         row = lambda q, a=(): c.execute(q, a).fetchone()
         calls = row("SELECT COUNT(*) FROM calls WHERE ts>=?", (since_ts,))[0]
         buys = row("SELECT COUNT(*), COALESCE(SUM(usd_spent),0), COALESCE(SUM(eth_spent),0) "
@@ -511,14 +633,14 @@ def add_pending_pool(ca: str):
     ca = str(ca).strip().lower()
     if not ca:
         return
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute(_PENDING_TABLE)
         c.execute("INSERT OR IGNORE INTO pending_pools(ca, first_seen, retries)"
                   " VALUES(?,?,0)", (ca, int(time.time())))
 
 
 def get_pending_pools(max_age_sec: int = 600) -> list:
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute(_PENDING_TABLE)
         rows = c.execute(
             "SELECT ca, first_seen, retries FROM pending_pools"
@@ -532,13 +654,13 @@ def remove_pending_pool(ca: str):
     ca = str(ca).strip().lower()
     if not ca:
         return
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute(_PENDING_TABLE)
         c.execute("DELETE FROM pending_pools WHERE ca=?", (ca,))
 
 
 def prune_pending_pools(max_age_sec: int = 600):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute(_PENDING_TABLE)
         c.execute("DELETE FROM pending_pools WHERE (? - first_seen) > ?",
                   (int(time.time()), int(max_age_sec)))
@@ -548,7 +670,7 @@ def increment_pending_retry(ca: str):
     ca = str(ca).strip().lower()
     if not ca:
         return
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute(_PENDING_TABLE)
         c.execute("UPDATE pending_pools SET retries = retries + 1 WHERE ca=?",
                   (ca,))
@@ -583,7 +705,7 @@ def wallet_privkey(row) -> str:
 
 def add_wallet(name, address, pk_hex, make_active=False) -> int:
     stored, enc = _wallet_encrypt(pk_hex)
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         if make_active:
             c.execute("UPDATE wallets SET active=0")
         cur = c.execute(
@@ -593,35 +715,35 @@ def add_wallet(name, address, pk_hex, make_active=False) -> int:
 
 
 def list_wallets():
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return [dict(r) for r in c.execute("SELECT * FROM wallets ORDER BY id")]
 
 
 def get_wallet(wid):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         r = c.execute("SELECT * FROM wallets WHERE id=?", (wid,)).fetchone()
     return dict(r) if r else None
 
 
 def active_wallet():
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         r = c.execute("SELECT * FROM wallets WHERE active=1 LIMIT 1").fetchone()
     return dict(r) if r else None
 
 
 def set_active_wallet(wid):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("UPDATE wallets SET active=0")
         c.execute("UPDATE wallets SET active=1 WHERE id=?", (wid,))
 
 
 def del_wallet(wid):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute("DELETE FROM wallets WHERE id=?", (wid,))
 
 
 def wallet_count() -> int:
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return c.execute("SELECT COUNT(*) FROM wallets").fetchone()[0]
 
 
@@ -657,7 +779,7 @@ def is_operator_funder(address, min_deployers=None) -> bool:
         return False
     n = int(min_deployers if min_deployers is not None else _funder_min_deployers())
     try:
-        with _lock, _conn() as c:
+        with _lock, _conn_cm() as c:
             if not _has_table(c, "operator_funders"):
                 return False
             d = c.execute("""SELECT COUNT(DISTINCT deployer) FROM operator_funders
@@ -680,7 +802,7 @@ def purge_operator_funders(min_deployers=None) -> dict:
     n = int(min_deployers if min_deployers is not None else _funder_min_deployers())
     banned = []
     now = int(time.time())
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         if not _has_table(c, "operator_funders"):
             return {"banned": 0, "wallets": []}
@@ -746,7 +868,7 @@ def record_insider_result(address: str, won: bool) -> dict:
     """
     address = str(address).strip().lower()
     now = int(time.time())
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         if won:
             c.execute("""UPDATE insider_wallets
@@ -778,7 +900,7 @@ def delete_insiders(addresses) -> int:
     if not addrs:
         return 0
     q = ",".join("?" * len(addrs))
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         c.execute(f"DELETE FROM insider_buys WHERE wallet IN ({q})", addrs)
         cur = c.execute(f"DELETE FROM insider_wallets WHERE address IN ({q})", addrs)
@@ -791,7 +913,7 @@ def prune_stale_insiders(max_inactive_days: int = 3) -> int:
     3 hari / 72 jam — memcoin exit liquiditas cepat), dengan
     win_count < 2 (skor belum layak). Return jumlah yang dinonaktifkan."""
     cutoff = int(time.time()) - max_inactive_days * 86400
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         cur = c.execute("""UPDATE insider_wallets SET enabled = 0
                            WHERE enabled = 1 AND last_seen > 0
@@ -820,7 +942,7 @@ def add_insider_wallet(address, label="", win_count=0, notes="", win_cas="",
     # sinyalnya = dev beli koin sendiri. Tolak sejak perekrutan.
     if is_operator_funder(address):
         return False
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         if update_if_exists:
             # set_wins=True → win_count = fakta ulang (MAX, tidak pernah
@@ -866,7 +988,7 @@ def get_active_insiders() -> list:
     """Daftar address insider yang aktif (huruf kecil, siap dibandingkan).
     Mengecualikan alamat sybil botnet yang ada di sybil_blacklist.
     """
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         rows = c.execute("""
             SELECT address FROM insider_wallets
@@ -879,7 +1001,7 @@ def get_active_insiders() -> list:
 def toggle_insider(address):
     """Aktif/non-aktifkan wallet insider. Return status baru (int)."""
     address = str(address).strip().lower()
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         c.execute("""UPDATE insider_wallets
                      SET enabled = 1 - enabled WHERE address=?""", (address,))
@@ -889,7 +1011,7 @@ def toggle_insider(address):
 
 
 def list_insiders(only_enabled=False):
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_wallets(c)
         q = "SELECT * FROM insider_wallets"
         if only_enabled:
@@ -937,7 +1059,7 @@ def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
         if is_operator_funder(w_clean):
             return
     now = int(ts if ts is not None else time.time())
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_buys(c)
         _init_insider_wallets(c)
         c.execute("""INSERT INTO insider_buys(ca,wallet,symbol,mcap,liq,pair_address,ts)
@@ -955,7 +1077,7 @@ def record_insider_buy(ca, wallet="", symbol="?", mcap=0.0, liq=0.0,
 def top_insider_buys(window_sec=3600, limit=10, now=None):
     now_i = int(now if now is not None else time.time())
     cutoff = now_i - max(60, int(window_sec or 3600))
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_buys(c)
         rows = c.execute("""
             SELECT ca,
@@ -993,12 +1115,12 @@ def is_sybil_blacklisted(address: str) -> bool:
     if not address:
         return False
     a = str(address).strip().lower()
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return c.execute("SELECT 1 FROM sybil_blacklist WHERE address = ?", (a,)).fetchone() is not None
 
 
 def list_sybil_blacklist() -> list[dict]:
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return [dict(r) for r in c.execute("SELECT * FROM sybil_blacklist ORDER BY detected_at DESC").fetchall()]
 
 
@@ -1032,7 +1154,7 @@ def detect_and_purge_sybil_clusters(min_wallets=None, window_sec=None, ca=None) 
         params.append(str(ca).strip().lower())
     query += " ORDER BY ca, ts ASC"
 
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         _init_insider_buys(c)
         _init_insider_wallets(c)
         rows = c.execute(query, params).fetchall()
@@ -1133,14 +1255,17 @@ _PONS_UPDATABLE = {"symbol", "name", "total_supply", "status", "score",
                    "verdict", "reason", "llm_model", "checked_at", "alerted_at",
                    "block_buy", "progress", "volume_usd", "trade_count",
                    "market_cap_usd", "raised_eth", "creator_tax_bps", "socials",
-                   "queued_at"}
+                   "queued_at", "quote_symbol", "quote_asset_class",
+                   "threshold_quote", "raised_usd"}
 
 
 def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
                                 launch_ts=0, symbol="", name="", total_supply=0.0,
                                 progress=0.0, volume_usd=0.0, trade_count=0,
                                 market_cap_usd=0.0, raised_eth=0.0,
-                                creator_tax_bps=0, socials="") -> bool:
+                                creator_tax_bps=0, socials="",
+                                quote_symbol="", quote_asset_class="",
+                                threshold_quote=0.0, raised_usd=0.0) -> bool:
     """Catat atau perbarui kandidat kurva Pons V2 dari API.
 
     Jika CA belum pernah tercatat: INSERT status='new'.
@@ -1153,15 +1278,17 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
     if not ca:
         return False
     now = int(time.time())
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         row = c.execute("SELECT status, block_buy FROM pons_queue WHERE ca=?", (ca,)).fetchone()
         if not row:
             c.execute(
                 """INSERT INTO pons_queue
                    (ca, deployer, curve, launch_block, launch_ts, symbol, name,
                     total_supply, progress, volume_usd, trade_count,
-                    market_cap_usd, raised_eth, creator_tax_bps, socials, queued_at, status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')""",
+                    market_cap_usd, raised_eth, creator_tax_bps, socials,
+                    quote_symbol, quote_asset_class, threshold_quote, raised_usd,
+                    queued_at, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'new')""",
                 (ca, (deployer or "").strip().lower() or None,
                  (curve or "").strip().lower() or None,
                  int(launch_block or 0), int(launch_ts or 0),
@@ -1169,7 +1296,10 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
                  float(progress or 0.0), float(volume_usd or 0.0),
                  int(trade_count or 0), float(market_cap_usd or 0.0),
                  float(raised_eth or 0.0), int(creator_tax_bps or 0),
-                 socials or "", now))
+                 socials or "", str(quote_symbol or "")[:24],
+                 str(quote_asset_class or "")[:16],
+                 float(threshold_quote or 0.0), float(raised_usd or 0.0),
+                 now))
             return True
         st = row["status"]
         bb = row["block_buy"]
@@ -1181,7 +1311,12 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
         c.execute(
             """UPDATE pons_queue SET
                progress=?, volume_usd=?, trade_count=?, market_cap_usd=?,
-               raised_eth=?, creator_tax_bps=?, socials=?,
+               raised_eth=CASE WHEN ?>0 THEN ? ELSE raised_eth END,
+               creator_tax_bps=?, socials=?,
+               quote_symbol=COALESCE(NULLIF(?, ''), quote_symbol),
+               quote_asset_class=COALESCE(NULLIF(?, ''), quote_asset_class),
+               threshold_quote=CASE WHEN ?>0 THEN ? ELSE threshold_quote END,
+               raised_usd=CASE WHEN ?>0 THEN ? ELSE raised_usd END,
                symbol=COALESCE(NULLIF(?, ''), symbol),
                name=COALESCE(NULLIF(?, ''), name),
                status=?,
@@ -1189,8 +1324,12 @@ def upsert_pons_curve_candidate(ca, deployer=None, curve=None, launch_block=0,
                WHERE ca=?""",
             (float(progress or 0.0), float(volume_usd or 0.0),
              int(trade_count or 0), float(market_cap_usd or 0.0),
-             float(raised_eth or 0.0), int(creator_tax_bps or 0),
-             socials or "", symbol or "", name or "", new_status,
+             float(raised_eth or 0.0), float(raised_eth or 0.0),
+             int(creator_tax_bps or 0), socials or "",
+             str(quote_symbol or "")[:24], str(quote_asset_class or "")[:16],
+             float(threshold_quote or 0.0), float(threshold_quote or 0.0),
+             float(raised_usd or 0.0), float(raised_usd or 0.0),
+             symbol or "", name or "", new_status,
              new_status, now, ca))
         return reset
 
@@ -1201,14 +1340,14 @@ def update_pons_token(ca, **fields):
     if not kv or not ca:
         return
     sets = ", ".join(f"{k}=?" for k in kv)
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         c.execute(f"UPDATE pons_queue SET {sets} WHERE ca=?",
                   (*kv.values(), str(ca).strip().lower()))
 
 
 def get_pons_pending(limit=50) -> list:
     """Antrean yang belum diputuskan, prioritas progress kurva tertinggi."""
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return [dict(r) for r in c.execute(
             "SELECT * FROM pons_queue WHERE status='new' "
             "ORDER BY progress DESC, launch_ts ASC LIMIT ?", (int(limit),))]
@@ -1235,9 +1374,44 @@ def get_pons_blocked_cas() -> set:
     Hanya baris `block_buy=1`. Dipanggil tiap 30 detik oleh loop refresh,
     BUKAN per kandidat — jalur beli cukup memeriksa set di memori.
     """
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return {str(r["ca"]).lower() for r in
                 c.execute("SELECT ca FROM pons_queue WHERE block_buy=1")}
+
+
+def is_pons_queue_member(ca) -> bool:
+    """True kalau CA pernah masuk antrean Radar Pons (= lahir dari Pons)."""
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return False
+    with _lock, _conn_cm() as c:
+        return c.execute("SELECT 1 FROM pons_queue WHERE ca=?", (ca,)).fetchone() is not None
+
+
+def get_pons_origin(ca):
+    """Cache provenance dari tabel pons_origin, atau None kalau belum pernah dicek."""
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return None
+    with _lock, _conn_cm() as c:
+        try:
+            row = c.execute("SELECT is_pons FROM pons_origin WHERE ca=?", (ca,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return bool(row["is_pons"]) if row else None
+
+
+def set_pons_origin(ca, is_pons):
+    """Simpan hasil deteksi factory Pons supaya tidak perlu HTTP tiap kali."""
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return
+    with _lock, _conn_cm() as c:
+        c.execute(
+            """INSERT INTO pons_origin(ca, is_pons, checked_at) VALUES(?,?,?)
+               ON CONFLICT(ca) DO UPDATE SET is_pons=excluded.is_pons,
+                                             checked_at=excluded.checked_at""",
+            (ca, 1 if is_pons else 0, int(time.time())))
 
 
 def mark_pons_alerted(ca, symbol=None, name=None, score=0, verdict="AMAN",
@@ -1253,7 +1427,7 @@ def mark_pons_alerted(ca, symbol=None, name=None, score=0, verdict="AMAN",
 def expire_pons_queue(max_age_sec=3600) -> int:
     """Kandidat 'new' yang sudah kelewat tua dianggap tidak relevan."""
     cutoff = int(time.time()) - int(max_age_sec)
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         cur = c.execute(
             """UPDATE pons_queue SET status='expired'
                WHERE status='new' AND (
@@ -1265,7 +1439,7 @@ def expire_pons_queue(max_age_sec=3600) -> int:
 
 def pons_alert_count_since(ts) -> int:
     """Jumlah alert terkirim sejak `ts` — dipakai cap per jam."""
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return int(c.execute(
             "SELECT COUNT(*) FROM pons_queue WHERE status='alerted' AND alerted_at >= ?",
             (int(ts),)).fetchone()[0])
@@ -1276,7 +1450,7 @@ def pons_stats(hours=24) -> dict:
     cutoff = int(time.time()) - int(hours) * 3600
     out = {"total": 0, "new": 0, "alerted": 0, "rejected": 0,
            "expired": 0, "alerts_24h": 0}
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         for r in c.execute("SELECT status, COUNT(*) n FROM pons_queue GROUP BY status"):
             out[r["status"]] = int(r["n"])
             out["total"] += int(r["n"])
@@ -1288,7 +1462,7 @@ def pons_stats(hours=24) -> dict:
 
 def recent_pons_alerts(hours=24, limit=20) -> list:
     cutoff = int(time.time()) - int(hours) * 3600
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         return [dict(r) for r in c.execute(
             "SELECT * FROM pons_queue WHERE status='alerted' AND alerted_at >= ? "
             "ORDER BY alerted_at DESC LIMIT ?", (cutoff, int(limit)))]
@@ -1303,7 +1477,7 @@ def pons_name_cluster(norm_name, since_ts) -> int:
     name = " ".join((norm_name or "").lower().split())
     if not name:
         return 0
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         rows = c.execute(
             "SELECT name FROM pons_queue WHERE launch_ts >= ? "
             "AND name IS NOT NULL AND name <> ''", (int(since_ts),)).fetchall()
@@ -1322,7 +1496,7 @@ def pons_deployer_history(deployer, window_sec=3600) -> dict:
     if not d:
         return {"launches": 0, "alerted": 0}
     cutoff = int(time.time()) - int(window_sec)
-    with _lock, _conn() as c:
+    with _lock, _conn_cm() as c:
         launches = c.execute(
             "SELECT COUNT(*) FROM pons_queue WHERE deployer=? AND launch_ts >= ?",
             (d, cutoff)).fetchone()[0]

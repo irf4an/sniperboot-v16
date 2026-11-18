@@ -77,14 +77,16 @@ def _dbconn():
     except Exception:
         path = "hoodsniper.db"
     import sqlite3
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path, timeout=30.0)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA busy_timeout=30000")
     con.execute(V4_POOLKEY_TABLE)
     return con
 
 
 def _cache_put(w3, pool_id: str, pk: "PoolKey", block: int):
-    with _dbconn() as c:
+    c = _dbconn()
+    try:
         c.execute(
             "INSERT OR IGNORE INTO v4_pool_keys"
             "(pool_id,currency0,currency1,fee,tick_spacing,hooks,block,ts)"
@@ -95,6 +97,9 @@ def _cache_put(w3, pool_id: str, pk: "PoolKey", block: int):
              int(pk.fee), int(pk.tickSpacing),
              str(pk.hooks).lower(), int(block),
              int(time.time())))
+        c.commit()
+    finally:
+        c.close()
 
 
 def _cache_get(pool_id: str) -> "PoolKey | None":
@@ -105,10 +110,13 @@ def _cache_get(pool_id: str) -> "PoolKey | None":
     if not pool_id:
         return None
     try:
-        with _dbconn() as c:
+        c = _dbconn()
+        try:
             row = c.execute(
                 "SELECT * FROM v4_pool_keys WHERE pool_id=?", (pool_id,)
             ).fetchone()
+        finally:
+            c.close()
     except Exception:
         return None
     if not row:

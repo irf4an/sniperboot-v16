@@ -500,13 +500,27 @@ async def _fastpath_gate(ca, pair, safety_result=None) -> tuple[bool, str, dict]
         base["dev_pct"] = dev                      # persen — simpan SEBELUM cek
     if dev and dev / 100.0 > max_dev:
         return False, f"dev_terlalu_besar ({dev:.1f}% > {max_dev*100:.0f}%)", base
+
+    # Token Pons dikecualikan dari gate top10 (lihat safety.check + config).
+    pons_bypass = False
+    if db.get("pons_bypass_top10", str) == "1":
+        try:
+            from .pons_origin import is_pons_launch
+            pons_bypass = await asyncio.to_thread(is_pons_launch, ca)
+        except Exception as e:
+            print(f"[fast-safety] ⚠️ deteksi Pons gagal — gate top10 tetap aktif: "
+                  f"{e.__class__.__name__}: {e}")
+
     exclude = {pair.get("pairAddress", ""), ca}
     top = base.get("top10_pct")
-    if top is None:
-        top = await asyncio.to_thread(safety.top_holders_pct, _trader, ca, exclude)  # persen (0-100)
-        base["top10_pct"] = top                    # persen — simpan SEBELUM cek
-    if top and top / 100.0 > max_top:
-        return False, f"top10_terlalu_besar ({top:.1f}% > {max_top*100:.0f}%)", base
+    if pons_bypass:
+        print(f"[fast-safety] 📡 {ca[:10]}… token Pons → bypass goldilocks top10")
+    else:
+        if top is None:
+            top = await asyncio.to_thread(safety.top_holders_pct, _trader, ca, exclude)  # persen (0-100)
+            base["top10_pct"] = top                # persen — simpan SEBELUM cek
+        if top and top / 100.0 > max_top:
+            return False, f"top10_terlalu_besar ({top:.1f}% > {max_top*100:.0f}%)", base
 
     metr = {}
     ok_m, tag, metr = ok_g, tag_g, base
