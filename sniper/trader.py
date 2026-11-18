@@ -59,23 +59,60 @@ def _txh(rcpt) -> str:
 # (freeze, blacklist, pause, trading dimatikan). Untuk kasus ini percobaan
 # kedua dengan min_out=1 cuma menambah revert + notifikasi tanpa peluang
 # berhasil — terukur 2.996 revert untuk 7 posisi sebelum pagar ini ada.
-_PERMANENT_REVERT_HINTS = (
-    "frozen", "freeze", "paused", "pause", "blacklist", "not transferable",
-    "nontransferable", "transfer not allowed", "trading disabled",
-    "transfers disabled", "not allowed",
+#
+# ⚠️ Daftar ini HANYA dipakai kalau kegagalannya memang revert kontrak.
+# Jangan pernah memasukkan frasa umum seperti "not allowed" / "pause" tanpa
+# konteks: `HTTP 403 Forbidden: method not allowed` dan
+# `Too Many Requests` adalah gangguan transport, bukan sifat token. Kalau
+# itu dianggap permanen, bot MENYERAH menjual token yang sebenarnya sehat.
+_STRONG_REVERT_HINTS = (
+    "frozen", "freeze", "blacklist", "not transferable", "nontransferable",
+    "transfer not allowed", "not allowed to transfer", "transfers disabled",
+    "transfers are disabled", "transfer is disabled", "trading disabled",
+    "trading is disabled", "trading not enabled", "paused", "pausable",
+)
+
+# Petunjuk bahwa kegagalan berasal dari LAPISAN TRANSPORT, bukan dari token.
+# Ini yang dulu bikin kerusakan: `HTTP 405 method not allowed` dibaca sebagai
+# "transfer tidak diizinkan" → posisi dianggap macet padahal tokennya sehat.
+# Pesan seperti ini selalu boleh dicoba lagi (min_out=1) begitu RPC pulih.
+#
+# ⚠️ Jangan pakai token terlalu umum di sini. `"http"` / `"connection"` /
+# angka telanjang (`"403"`) ikut cocok dengan pesan revert yang sah
+# ("frozen for 403 days", "transfers disabled; rpc=https://…", "connection
+# id 7") — akibatnya revert PERMANEN dibaca sebagai gangguan sementara dan
+# bot kembali membanjiri RPC. Semua penanda di bawah harus spesifik ke
+# lapisan transport.
+_TRANSPORT_HINTS = (
+    "client error", "server error", "status code", "forbidden",
+    "unauthorized", "method not allowed", "too many requests", "rate limit",
+    "rate-limited", "timed out", "timeout", "connectionerror",
+    "connection aborted", "connection reset", "connection refused",
+    "max retries exceeded", "remote end closed", "ssl", "certificate",
+    "name or service not known", "temporary failure", "service unavailable",
+    "bad gateway", "gateway timeout", "circuit breaker", "bad response",
+    "nonce too low", "nonce has already been used",
+    "replacement transaction underpriced", "already known",
+    "insufficient funds", "gas required exceeds", "max fee per gas",
 )
 
 
 def _permanent_revert(err) -> bool:
-    """True = revert permanen (freeze/blacklist/pause) → jangan coba lagi.
+    """True = revert kontrak permanen (freeze/blacklist/pause) → jangan coba lagi.
 
     Sengaja HANYA keyword-based: revert harga/slippage yang tidak ter-decode
     tetap harus boleh lewat panic exit (min_out=1), karena itu jaring
     pengaman terakhir buat keluar dari pool yang bergerak. Yang kita buang
     cuma percobaan kedua untuk revert yang jelas-jelas permanen.
+
+    Error transport (403/405/429/timeout/RPC down) SELALU dianggap sementara,
+    apa pun kata yang kebetulan muncul di dalamnya. `HTTP 405 method not
+    allowed` bukan bukti token memblokir transfer.
     """
     msg = str(err).lower()
-    return any(h in msg for h in _PERMANENT_REVERT_HINTS)
+    if any(h in msg for h in _TRANSPORT_HINTS):
+        return False
+    return any(h in msg for h in _STRONG_REVERT_HINTS)
 
 
 def _active_key():

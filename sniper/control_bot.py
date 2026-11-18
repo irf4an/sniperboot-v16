@@ -5,6 +5,7 @@ Settings (edit semua parameter), Stats, Pause/Resume.
 """
 import asyncio
 import re
+import time
 import traceback
 from telethon import events, Button, utils
 from . import config, db, engine, agent, fmt
@@ -153,9 +154,14 @@ def main_menu_buttons():
 
 async def positions_panel():
     rows = db.open_positions()
+    stuck = db.stuck_positions()
+    nav = [[Button.inline("« Menu", b"menu")]]
+    if not rows and not stuck:
+        return "📊 **Posisi**\n\nTidak ada posisi terbuka.", nav
     if not rows:
-        return "📊 **Posisi**\n\nTidak ada posisi terbuka.", [[Button.inline("« Menu", b"menu")]]
-    lines, buttons = ["📊 **Posisi Terbuka**\n"], []
+        lines, buttons = ["📊 **Posisi Terbuka**\n", "_Tidak ada posisi terbuka._"], []
+    else:
+        lines, buttons = ["📊 **Posisi Terbuka**\n"], []
     for p in rows:
         pair = await engine.current_pair(p)
         price = float((pair or {}).get("priceUsd") or 0)
@@ -176,6 +182,21 @@ async def positions_panel():
             Button.inline("🚨 ALL", f"sell:{p['id']}:100"),
             Button.url("📊", f"https://dexscreener.com/{p['chain_slug']}/{p['pair_address']}"),
         ])
+    if stuck:
+        lines.append("\n🧊 **Macet — jual dihentikan otomatis**")
+        lines.append("_Gagal jual berulang; token mungkin masih ada di wallet. "
+                     "Tombol di bawah mencoba sekali lagi dan me-reset penghitung._")
+        for p in stuck:
+            left = p.get("tokens_left") or 0
+            age = ""
+            ts = p.get("closed_at") or 0
+            # closed_at bisa 0/kosong di baris lama → jangan tampilkan umur
+            # yang mengarang (mis. "29916104m lalu" dari epoch 1970).
+            if ts and ts > 1_000_000_000:
+                age = f" · {max(int((time.time() - ts) / 60), 0)}m lalu"
+            lines.append(f"🧊 **{p['symbol']}** · sisa {left:,.0f} token{age}")
+            buttons.append([Button.inline(f"🔄 Coba jual {p['symbol']}",
+                                          f"sell:{p['id']}:100")])
     buttons.append([Button.inline("« Menu", b"menu")])
     return "\n".join(lines), buttons
 

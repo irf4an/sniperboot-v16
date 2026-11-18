@@ -1,8 +1,10 @@
 """v16.5 Solusi B: verifikasi setting default baru + migrasi DB lama.
 
-1) config.SETTING_DEFAULTS: buy_slippage 0.60, scanner_interval_sec 5.
+1) config.SETTING_DEFAULTS: buy_slippage 0.25, scanner_interval_sec 5.
 2) db.init() baru mengisi DB dengan nilai default baru.
-3) DB lama (0.30 / 15) dinaikkan otomatis oleh migrasi di db.init().
+3) DB lama: scanner_interval_sec 15 → 5 dimigrasi otomatis. buy_slippage
+   TIDAK dimigrasi — mengubah toleransi slippage berarti mengubah risiko
+   modal, jadi harus lewat keputusan operator di panel Settings.
 """
 import os
 import sys
@@ -42,12 +44,14 @@ check("DB scanner_mcap_max default = 45000",
       db.get("scanner_mcap_max") == 45000,
       str(db.get("scanner_mcap_max")))
 
-# simulasi DB lama: user tak pernah ubah (masih nilai default lama)
+# DB lama: buy_slippage SENGAJA tidak dimigrasi otomatis.
+# Toleransi slippage = risiko modal, jadi perubahan 0.60 → 0.25 harus
+# lewat keputusan operator (panel Settings), bukan efek samping restart.
 db.set_("buy_slippage", "0.30")
 db.set_("scanner_interval_sec", "15")
-db.init()   # migrasi harus menaikkan kembali
-check("migrasi DB lama 0.30 → 0.25", db.get("buy_slippage") == 0.25,
-      str(db.get("buy_slippage")))
+db.init()
+check("buy_slippage DB lama TIDAK disentuh migrasi (0.30 tetap)",
+      db.get("buy_slippage") == 0.30, str(db.get("buy_slippage")))
 check("migrasi DB lama 15 → 5", db.get("scanner_interval_sec") == 5,
       str(db.get("scanner_interval_sec")))
 
