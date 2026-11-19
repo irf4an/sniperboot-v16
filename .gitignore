@@ -1,5 +1,8 @@
 # Secrets & Environment (JANGAN PERNAH DI-PUSH)
 .env
+# Backup .env ikut memuat token/API key — jangan sampai ikut ke-track
+.env.*
+!.env.example
 *.session
 *.session-journal
 *.key
