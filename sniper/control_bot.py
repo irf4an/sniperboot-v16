@@ -8,7 +8,27 @@ import re
 import time
 import traceback
 from telethon import events, Button, utils
+try:
+    from telethon.errors import MessageNotModifiedError
+except Exception:  # stub telethon di unit test tidak punya submodul .errors
+    class MessageNotModifiedError(Exception):
+        pass
 from . import config, db, engine, agent, fmt
+
+
+async def _edit_safe(event, text, buttons=None):
+    """event.edit yang tidak meledak bila hasil edit identik dengan isinya.
+
+    Telethon melempar `MessageNotModifiedError` ketika teks/tombol baru SAMA
+    dengan yang sudah tampil (mis. tombol ditekan dua kali). Tanpa ini,
+    exception kosmetik tersebut tertangkap `except Exception` di handler dan
+    MENIMPA hasil asli dengan "⚠️ gagal: Content of the message was not
+    modified" — padahal yang sebenarnya terjadi adalah penolakan filter.
+    """
+    try:
+        return await event.edit(text, buttons=buttons)
+    except MessageNotModifiedError:
+        return None
 
 _pending = {}  # admin_id -> action string ("add_source" | "set:key" | "insaddr")
 _wd_plan = {}  # admin_id -> {"dest": alamat, "amount": str} untuk konfirmasi tarik
@@ -598,6 +618,44 @@ def register(bot, trader, user_client=None):
         return await event.respond(public_start_text(),
                                    buttons=public_start_buttons())
 
+    @bot.on(events.NewMessage(pattern=r"^/audit"))
+    async def audit_exits(event):
+        """Admin: bandingkan PnL 'layar' (Dexscreener) vs hasil jual on-chain.
+
+        Alasannya ada: notif Telegram hilang, dan tanpa jejak harga saat exit
+        tidak ada cara membedakan edge nyata dari wick di pool tipis.
+        """
+        if not _admin(event):
+            return
+        rows = db.recent_exits(12)
+        st = db.exit_audit_stats()
+        if not rows:
+            return await event.respond(
+                "🔍 **Audit Exit**\n\nBelum ada data. Tabel `exit_log` otomatis "
+                "terisi setiap kali TP/SL/trail/timeout dieksekusi.")
+        lines = ["🔍 **Audit Exit — layar vs on-chain**", ""]
+        for r in rows:
+            sp = r["spot_pnl"] or 0
+            rp = r["real_pnl"] or 0
+            spd = r["spread_pct"]
+            spd_s = f"{spd*100:+.0f}%" if spd is not None else "n/a"
+            liq = r["pool_liq_usd"]
+            liq_s = f"${liq:,.0f}" if liq else "n/a"
+            flag = " ⚠️" if abs(rp - sp) > 0.25 else ""
+            lines.append(
+                f"`{r['symbol']}` {r['reason']} · layar {sp*100:+.0f}% → "
+                f"on-chain {rp*100:+.0f}%{flag}\n"
+                f"   spread harga {spd_s} · liq {liq_s}")
+        lines += ["",
+                  f"📊 Total exit tercatat: **{st['total']}**",
+                  f"⚠️ Divergen >25 poin: **{st['divergen']}** "
+                  f"(on-chain lebih baik {st['real_lebih_baik']}, "
+                  f"layar lebih baik {st['layar_lebih_baik']})",
+                  "",
+                  "_Divergen tinggi + liq kecil = cuan dari wick pool tipis, "
+                  "bukan edge yang bisa diulang._"]
+        await event.respond("\n".join(lines))
+
     @bot.on(events.NewMessage(pattern=r"^/id"))
     async def id_help(event):
         if not _admin(event):
@@ -1082,6 +1140,43 @@ async def _route(event, data):
         await event.answer("eksekusi sell…")
         result = await engine.execute_sell(int(pid), int(pct) / 100, "manual")
         await event.respond(result)
+    elif data.startswith("ponsbuy:"):
+        ca = data.split(":", 1)[1]
+        try:
+            buy_usd = float(db.get("buy_usd") or 0)
+        except (TypeError, ValueError):
+            buy_usd = 0.0
+        dry = db.get("agent_dry_run", str) == "1"
+        await event.answer("konfirmasi dulu")
+        await event.edit(
+            "🟢 **KONFIRMASI BELI**\n\n"
+            f"`{ca}`\n\n"
+            f"Ukuran posisi : **${buy_usd:g}**\n"
+            f"Mode         : **{'SIMULASI (dry-run)' if dry else 'LIVE — uang asli'}**\n\n"
+            "_Koin tetap melewati safety + fast-path yang sama seperti sinyal lain._",
+            buttons=[[
+                Button.inline("✅ Ya, beli", data=f"ponsbuyok:{ca}"),
+                Button.inline("❌ Batal", data="ponsbuyx"),
+            ]])
+    elif data.startswith("ponsbuyok:"):
+        ca = data.split(":", 1)[1]
+        await event.answer("memproses…")
+        try:
+            from . import listener
+            try:
+                mcap_max = float(db.get("scanner_mcap_max") or 45000)
+            except (TypeError, ValueError):
+                mcap_max = 45000.0
+            src = {"id": None, "name": "RADAR PONS", "mcap_max": mcap_max}
+            status = await listener.process_ca(ca, src, None, "RADAR PONS",
+                                               allow_buy=True, manual=True)
+            await _edit_safe(event, f"`{ca}`\n\n**status:** `{status}`", buttons=None)
+        except Exception as e:
+            traceback.print_exc()
+            await _edit_safe(event, f"`{ca}`\n\n⚠️ gagal: {e}", buttons=None)
+    elif data == "ponsbuyx":
+        await event.answer("dibatalkan")
+        await event.edit("❌ Pembelian dibatalkan.", buttons=None)
     elif data.startswith("srct:"):
         db.toggle_source(int(data[5:]))
         t, b = sources_panel()

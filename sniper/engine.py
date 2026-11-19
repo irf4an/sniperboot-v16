@@ -341,6 +341,36 @@ async def _execute_sell_locked(pos_id: int, fraction: float, reason: str):
     thin = spot_pnl > 0 and (spot_pnl - real_pnl) > 0.30
     left = max(pos["tokens_left"] - sold, 0)
     tag = f"{sim_prefix}{pos['symbol']} (`{pos['ca'][:10]}…`)"
+
+    # ---------- 🔍 AUDIT JUAL: simpan "layar vs on-chain" ke DB ----------
+    # Notif Telegram hilang setelah beberapa hari; sengketa "kenapa realized
+    # +39% padahal layar -8%" hanya bisa dijawab kalau harga kedua sisi
+    # disimpan saat exit. Liq pool ikut disimpan karena wick di pool tipis
+    # adalah penjelasan paling umum untuk divergensi besar.
+    try:
+        px_dex = float(price or 0)
+        px_onchain = (pos["entry_price_usd"] * (1.0 + real_pnl)
+                      if pos.get("entry_price_usd") else 0.0)
+        eth_usd_now = (px_dex / price_native) if price_native > 0 else 0.0
+        if not eth_usd_now and _trader:
+            try:
+                _p = await asyncio.to_thread(dx.best_pair, pos["ca"])
+                eth_usd_now = dx.eth_usd(_p) if _p else 0.0
+            except Exception:
+                eth_usd_now = 0.0
+        pools = [p for p in (dx.token_pairs(pos["ca"]) or [])
+                 if str(p.get("pairAddress", "")).lower()
+                 == str(pos.get("pair_address", "")).lower()]
+        liq_now = float(((pools[0].get("liquidity") or {}).get("usd"))
+                        if pools else 0) or None
+        db.log_exit(pos_id, pos["symbol"], pos["ca"], reason,
+                    sold, eth_real, eth_usd_now, spot_pnl, real_pnl,
+                    px_dex, px_onchain, liq_usd=liq_now,
+                    extra=f"left={left:.0f};sim={int(bool(pos.get('is_simulated')))}")
+    except Exception as _e:
+        # Audit TIDAK boleh menggagalkan exit — uang lebih penting dari log.
+        print(f"[exit-log] gagal catat {pos['symbol']}: {_e}")
+
     nums = (f"layar {spot_pnl*100:+.1f}% → **realized {real_pnl*100:+.1f}%**\n"
             f"{sold:,.0f} token → **{eth_real:.6f} ETH** masuk · gas {gas_eth:.6f} {_txlink(swap_tx)}")
 

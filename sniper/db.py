@@ -147,6 +147,16 @@ def init():
             status TEXT DEFAULT 'open',
             honeypot INTEGER DEFAULT 0,
             source_name TEXT, ts INTEGER)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS exit_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pos_id INTEGER, symbol TEXT, ca TEXT, reason TEXT,
+            tokens_sold REAL, eth_out REAL, eth_usd REAL,
+            spot_pnl REAL, real_pnl REAL,
+            px_dex REAL, px_onchain REAL, spread_pct REAL,
+            mcap_onchain REAL, pool_liq_usd REAL,
+            extra TEXT, ts INTEGER)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_exit_log_pos "
+                  "ON exit_log(pos_id)")
         c.execute("""CREATE TABLE IF NOT EXISTS decisions(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ca TEXT, symbol TEXT, role TEXT, action TEXT,
@@ -457,6 +467,86 @@ def update_position(pid, **fields):
 def add_realized(pid, eth_out):
     with _lock, _conn_cm() as c:
         c.execute("UPDATE positions SET realized_eth = realized_eth + ? WHERE id=?", (eth_out, pid))
+
+
+def log_exit(pos_id, symbol, ca, reason, tokens_sold, eth_out, eth_usd,
+             spot_pnl, real_pnl, px_dex, px_onchain, mcap_onchain=None,
+             liq_usd=None, extra=None):
+    """Catat SATU baris jejak exit supaya PnL bisa diaudit belakangan.
+
+    Kenapa tabel sendiri, bukan kolom di `positions`: satu posisi bisa punya
+    beberapa exit (TP1, TP2, SL, trail, timeout) dan yang perlu dibandingkan
+    adalah DERET harga saat masing-masing exit — bukan nilai terakhir saja.
+
+    Kolom yang menyelesaikan sengketa "layar vs realized":
+      px_dex        harga Dexscreener saat exit (angka 'layar')
+      px_onchain    harga efektif dari quote jual on-chain (angka 'realized')
+      quote_eth     hasil quote jual mentah (ETH) sebelum dikurangi biaya
+      spot_pnl      PnL versi layar
+      real_pnl      PnL versi quote on-chain
+      spread_pct    selisih relatif layar vs on-chain (bukti delay/wick)
+      pool_liq_usd  likuiditas pool → menjelaskan wick di pool tipis
+    """
+    spread = None
+    if px_dex and px_onchain and px_dex > 0:
+        spread = (px_onchain / px_dex) - 1.0
+    with _lock, _conn_cm() as c:
+        c.execute(
+            "INSERT INTO exit_log(pos_id,symbol,ca,reason,tokens_sold,eth_out,"
+            "eth_usd,spot_pnl,real_pnl,px_dex,px_onchain,spread_pct,"
+            "mcap_onchain,pool_liq_usd,extra,ts) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (pos_id, symbol, str(ca or "").lower(), reason, tokens_sold,
+             eth_out, eth_usd, spot_pnl, real_pnl, px_dex, px_onchain, spread,
+             mcap_onchain, liq_usd, extra, int(time.time())))
+        return c.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def recent_exits(n=20, pos_id=None):
+    """Jejak exit terbaru (default 20). pos_id → riwayat satu posisi."""
+    with _lock, _conn_cm() as c:
+        if pos_id is not None:
+            rows = c.execute(
+                "SELECT * FROM exit_log WHERE pos_id=? ORDER BY id DESC LIMIT ?",
+                (pos_id, n)).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM exit_log ORDER BY id DESC LIMIT ?", (n,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def exit_audit_stats():
+    """Ringkasan: berapa banyak exit yang 'layar' dan 'realized' bertentangan.
+
+    Ini yang membedakan edge nyata dari wick pool tipis. `divergen` = selisih
+    PnL layar vs on-chain > 25 poin persen (arah mana pun).
+    """
+    with _lock, _conn_cm() as c:
+        rows = c.execute(
+            "SELECT pos_id, symbol, reason, spot_pnl, real_pnl, spread_pct, "
+            "pool_liq_usd FROM exit_log").fetchall()
+    out = {"total": len(rows), "divergen": 0, "real_lebih_baik": 0,
+           "layar_lebih_baik": 0, "contoh": []}
+    for r in rows:
+        sp, rp = r["spot_pnl"], r["real_pnl"]
+        if sp is None or rp is None:
+            continue
+        d = (rp - sp)
+        if abs(d) > 0.25:
+            out["divergen"] += 1
+            if d > 0:
+                out["real_lebih_baik"] += 1
+            else:
+                out["layar_lebih_baik"] += 1
+            if len(out["contoh"]) < 5:
+                out["contoh"].append({
+                    "symbol": r["symbol"], "reason": r["reason"],
+                    "layar_pct": round(sp * 100, 1),
+                    "real_pct": round(rp * 100, 1),
+                    "spread_pct": (round(r["spread_pct"] * 100, 1)
+                                   if r["spread_pct"] is not None else None),
+                    "pool_liq": r["pool_liq_usd"]})
+    return out
 
 
 def reset_stats(pos_id=None, call_rowid=None):
