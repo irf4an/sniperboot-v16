@@ -216,16 +216,83 @@ class _PoolKeyWithBlock:
         self.block = block
 
 
-def pool_key(pool_id, w3):
+_BLOCK_TIME_CACHE = {"ts": 0.0, "value": None}
+
+# Chain ini SANGAT cepat: terukur 0,108 detik/blok (118.162.835 → 118.062.835
+# hanya berjarak 108 detik). Artinya jendela lama 200.000 blok cuma ~6 JAM,
+# sehingga pool yang lebih tua dari itu MUSTAHIL ditemukan dengan scan mundur
+# dan semua quote/buy v4 gagal "poolkey_notfound". Karena itu, bila waktu
+# pembuatan pool diketahui (pairCreatedAt Dexscreener), bloknya diestimasi
+# lebih dulu lalu dicari di jendela sempit — terukur 0,25 detik vs 10 detik
+# (dan gagal) pada scan mundur.
+def _block_time(w3, latest=None):
+    """Detik per blok, di-cache 10 menit. None bila RPC tak bisa dibaca."""
+    now = time.time()
+    if _BLOCK_TIME_CACHE["value"] and now - _BLOCK_TIME_CACHE["ts"] < 600:
+        return _BLOCK_TIME_CACHE["value"]
+    try:
+        latest = int(latest if latest is not None else w3.eth.block_number)
+        span = 50000
+        b_new = w3.eth.get_block(latest)
+        b_old = w3.eth.get_block(max(0, latest - span))
+        n = latest - max(0, latest - span)
+        if n <= 0:
+            return None
+        dt = (b_new["timestamp"] - b_old["timestamp"]) / float(n)
+        if dt <= 0:
+            return None
+        _BLOCK_TIME_CACHE["ts"] = now
+        _BLOCK_TIME_CACHE["value"] = dt
+        return dt
+    except Exception:
+        return None
+
+
+def _estimate_block_for_ts(w3, ts_sec, latest=None):
+    """Perkiraan nomor blok pada waktu `ts_sec` (unix detik). None bila ragu."""
+    try:
+        latest = int(latest if latest is not None else w3.eth.block_number)
+        b = w3.eth.get_block(latest)
+        bt = _block_time(w3, latest)
+        if not bt:
+            return None
+        delta = (float(b["timestamp"]) - float(ts_sec)) / bt
+        if delta < 0:
+            return latest
+        return max(0, latest - int(delta))
+    except Exception:
+        return None
+
+
+def _find_initialize(pm, topic1, w3, from_block, to_block):
+    """get_logs Initialize untuk satu PoolId. None bila RPC error."""
+    try:
+        return w3.eth.get_logs({
+            "address": pm,
+            "topics": [INITIALIZE_TOPIC0, topic1],
+            "fromBlock": max(0, from_block),
+            "toBlock": max(0, to_block),
+        })
+    except Exception:
+        return None
+
+
+def pool_key(pool_id, w3, created_ms=None):
     """Temukan PoolKey sebuah PoolId v4, dari event Initialize PoolManager.
 
     pools di chain ini memang banyak; pencarian mundur berlapis dan
     hasilnya di-cache ke SQLite `v4_pool_keys` supaya siklus selanjutnya
     tidak jaringan lagi.
 
+    `created_ms` = pairCreatedAt Dexscreener (milidetik). Bila diisi, blok
+    pembuatan pool diestimasi dari block time lalu dicari di jendela sempit
+    (±5k blok). Ini WAJIB untuk chain ini: block time 0,108 s membuat scan
+    mundur 200k blok hanya mencakup ~6 jam, sementara pool v4 Pons yang
+    graduate bisa berumur berjam-jam → quote/buy gagal poolkey_notfound.
+
     - pool_id BUKAN PoolId (bukan 64-hex) → None (pemanggil wajib skip).
     - Ketemu → PoolKey (kenti ter-cache).
-    - Tidak ketemu dalam SEARCH_MAX_STEPS langkah (200k blok) → None.
+    - Tidak ketemu → None.
     - w3 None atau error jaringan → None (TIDAK crash).
     """
     if w3 is None or pool_id is None:
@@ -243,21 +310,14 @@ def pool_key(pool_id, w3):
     except Exception:
         return None
 
-    topic = "0x" + pool_id.lower().removeprefix("0x")
+    topic1 = "0x" + pool_id.removeprefix("0x").zfill(64)
     pm = Web3.to_checksum_address(POOL_MANAGER)
-    from_block = latest
-    for step in range(SEARCH_MAX_STEPS):
-        end = from_block
-        from_block = max(0, end - SEARCH_STEP_BLOCKS + 1)
-        try:
-            logs = w3.eth.get_logs({
-                "address": pm,
-                "topics": [INITIALIZE_TOPIC0, "0x" + topic.removeprefix("0x").zfill(64)],
-                "fromBlock": from_block,
-                "toBlock": end,
-            })
-        except Exception:
-            return None
+
+    def _scan(from_block, to_block):
+        """Kembalikan PoolKey atau None; raise RuntimeError bila RPC error."""
+        logs = _find_initialize(pm, topic1, w3, from_block, to_block)
+        if logs is None:
+            raise RuntimeError("get_logs gagal")
         for log in logs:
             try:
                 pk = _to_params(log)
@@ -265,12 +325,43 @@ def pool_key(pool_id, w3):
                 pk = None
             if pk is None:
                 continue
-            out = PoolKey(pk.currency0, pk.currency1, pk.fee, pk.tickSpacing, pk.hooks)
+            out = PoolKey(pk.currency0, pk.currency1, pk.fee,
+                          pk.tickSpacing, pk.hooks)
             try:
                 _cache_put(w3, pool_id, out, pk.block)
             except Exception:
                 pass  # cache gagal → kembalikan saja nilainya
             return out
+        return None
+
+    # ---- 1. jalur cepat: estimasi blok dari waktu pembuatan pool ----
+    if created_ms:
+        try:
+            ts_sec = float(created_ms) / 1000.0
+        except (TypeError, ValueError):
+            ts_sec = None
+        if ts_sec:
+            est = _estimate_block_for_ts(w3, ts_sec, latest)
+            if est is not None:
+                for margin in (5000, 50000):
+                    try:
+                        got = _scan(est - margin, est + margin)
+                    except RuntimeError:
+                        break
+                    if got is not None:
+                        return got
+
+    # ---- 2. mundur berlapis (fallback / created_ms tidak diketahui) ----
+    from_block = latest
+    for _ in range(SEARCH_MAX_STEPS):
+        end = from_block
+        from_block = max(0, end - SEARCH_STEP_BLOCKS + 1)
+        try:
+            got = _scan(from_block, end)
+        except RuntimeError:
+            return None
+        if got is not None:
+            return got
         if from_block == 0:
             return None  # sudah sampai genesis
     return None
@@ -429,9 +520,19 @@ def _quote_single(pool_key_tuple, zero_for_one: bool, amount_in: int, w3):
 
 
 def quote_buy(pool_key_tuple, amount_in_wei, w3):
-    """Quoter V4Quoter.quoteExactInputSingle beli ETH→token (zeroForOne=True,
-    currency0 = sentinel alamat nol = ETH native)."""
-    return _quote_single(pool_key_tuple, True, amount_in_wei, w3)
+    """Quoter V4Quoter.quoteExactInputSingle arah BELI (quote → token).
+
+    Arah zeroForOne ditentukan dari PoolKey, BUKAN hardcoded. Pool v4 di
+    chain ini sering memakai USDG (ERC20 6 desimal) sebagai currency0, jadi
+    `zeroForOne=True` selalu (asumsi lama: ETH native di currency0) membuat
+    quote gagal/poolkey salah untuk pool USDG.
+    `amount_in_wei` = jumlah unit RAW dari aset quote (bukan selalu 1e18).
+    """
+    pk = pool_key_tuple if isinstance(pool_key_tuple, PoolKey) else \
+        PoolKey(*_tuple5(pool_key_tuple))
+    # Beli = dari quote ke token. Arahnya zeroForOne bila quote = currency0.
+    zf = _same_addr(pk.currency0, quote_asset(pk, pk.currency1))
+    return _quote_single(pk, zf, amount_in_wei, w3)
 
 
 def quote_sell(pool_key_tuple, amount_in_tokens_raw, w3):
@@ -459,10 +560,39 @@ ACT_TAKE_ALL = 0x0f
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
+def _same_addr(a, b):
+    return str(a or "").lower() == str(b or "").lower()
+
+
 def _as_poolkey(pk):
     if isinstance(pk, PoolKey):
         return pk
     return PoolKey(*_tuple5(pk))
+
+
+def quote_asset(pk, token_ca):
+    """Alamat aset QUOTE sebuah pool v4 = sisi yang BUKAN token.
+
+    Pool v4 di chain ini tidak selalu ETH-quoted: token Pons yang graduate
+    memakai USDG (ERC20 6 desimal) sebagai currency0. Kode lama mengasumsikan
+    currency0 == 0x0 (ETH) sehingga (a) input di-scale 1e18 padahal USDG 1e6 →
+    jumlah 1e12 lebih besar, dan (b) `encode_buy` menolak/mengirim tx salah.
+    Return None bila token tidak ada di PoolKey (data rusak).
+    """
+    pk = _as_poolkey(pk)
+    token = str(token_ca or "").lower()
+    c0, c1 = str(pk.currency0).lower(), str(pk.currency1).lower()
+    if c1 == token and c0 != token:
+        return pk.currency0
+    if c0 == token and c1 != token:
+        return pk.currency1
+    return None
+
+
+def is_native(pk):
+    pk = _as_poolkey(pk)
+    return _same_addr(pk.currency0, ZERO_ADDRESS) or \
+        _same_addr(pk.currency1, ZERO_ADDRESS)
 
 
 def _swap_direction_for_buy(pk):
@@ -474,32 +604,36 @@ def _swap_direction_for_buy(pk):
     return None       # token di currency0 → butuh wrap WETH, tak didukung
 
 
-def encode_buy(pool_key, amount_in, min_out, deadline=0, hook_data=b""):
-    """Encode perintah UniversalRouter 'buy exact ETH → token' tanpa transaksi.
+def encode_buy(pool_key, amount_in, min_out, deadline=0, hook_data=b"",
+               token_ca=None):
+    """Encode perintah UniversalRouter 'buy exact <quote> → token'.
 
-    FORMAT (diverifikasi dari tx v4 nyata on-chain):
-      commands = b"\\x10" (V4_SWAP)
-      inputs[0] = abi.encode(["bytes","bytes[]"], [actions, params])
-        actions = 3 byte OPSDI SAJA: 0x06 0x0c 0x0f
-        params  = [abi.encode(ExactInputSingleParams),
-                   abi.encode(SETTLE_ALL=(currency,uint256)),
-                   abi.encode(TAKE_ALL=(currency,uint256))]
-      value = amount_in (buy pakai ETH native)
+    Mendukung DUA jenis quote, ditentukan dari PoolKey (bukan asumsi):
+      • ETH native  → `value` = amount_in (wei)
+      • ERC20 quote (mis. USDG 6 desimal) → `value` = 0, ditarik lewat
+        SETTLE/Permit2 sebagai currency ERC20.
 
-    Return (commands, inputs, value). Value selalu int (wei).
+    Kode lama meng-hardcode ETH sebagai currency0: pool USDG ditolak
+    `unsupported_native_side`, dan bila dipaksa input di-scale 1e18 untuk
+    token 6 desimal (1e12 terlalu besar).
+
+    `token_ca` opsional — bila None, token dianggap currency1 (sisi yang
+    lebih besar, konvensi v4 currency0 < currency1 pada pool chain ini).
+
+    Return (commands, inputs, value).
     """
     pk = _as_poolkey(pool_key)
-    zf = _swap_direction_for_buy(pk)
-    if zf is None:
-        # D5: token di sisi currency0 — buy ETH native langsung tidak bisa
-        # (ETH harus di currency0). Jangan diam-diam hasilkan tx salah arah.
-        raise ValueError(
-            'kind="unsupported_native_side": token di currency0 '
-            f"({pk.currency0}); buy ETH native butuh token di currency1 "
-            "(currency0 = 0x0)")
+    token = str(token_ca or pk.currency1).lower()
+    q = quote_asset(pk, token)
+    if q is None:
+        raise ValueError(f"PoolKey tidak memuat token {token}: {pk}")
+    token_is_c1 = _same_addr(pk.currency1, token)
+    zero_for_one = token_is_c1          # beli = quote → token
+    native = _same_addr(q, ZERO_ADDRESS)
+
     exact_in = (
         (pk.currency0, pk.currency1, pk.fee, pk.tickSpacing, pk.hooks),
-        True,                     # zeroForOne: ETH(0) → token
+        zero_for_one,
         int(amount_in),
         int(min_out),
         bytes(hook_data),
@@ -507,34 +641,34 @@ def encode_buy(pool_key, amount_in, min_out, deadline=0, hook_data=b""):
     actions = bytes([ACT_SWAP_EXACT_IN_SINGLE, ACT_SETTLE_ALL, ACT_TAKE_ALL])
     params = [
         eth_abi_encode_exact_in(exact_in),
-        eth_abi_encode((ZERO_ADDRESS, int(amount_in))),                   # SETTLE_ALL: ETH maxAmount
-        eth_abi_encode((pk.currency1, int(min_out))),                    # TAKE_ALL: token minAmount
+        eth_abi_encode((pk.currency0 if zero_for_one else pk.currency1,
+                        int(amount_in))),                 # SETTLE_ALL: quote masuk
+        eth_abi_encode((pk.currency1 if zero_for_one else pk.currency0,
+                        int(min_out))),                   # TAKE_ALL: token keluar
     ]
     inputs = [_encode_v4_input(actions, params)]
-    return CMD_V4_SWAP, inputs, int(amount_in)
+    return CMD_V4_SWAP, inputs, (int(amount_in) if native else 0)
 
 
-def encode_sell(pool_key, amount_in, min_out, deadline=0, hook_data=b""):
-    """Encode perintah UniversalRouter 'sell exact token → ETH' tanpa transaksi.
+def encode_sell(pool_key, amount_in, min_out, deadline=0, hook_data=b"",
+                token_ca=None):
+    """Encode perintah UniversalRouter 'sell exact token → <quote pool>'.
 
-    Arah zeroForOne=False (token → ETH): SETTLE_ALL memasukkan token,
-    TAKE_ALL menerima ETH. Aset token harus di-approve dua lapis:
-      1. token.approve(PERMIT2, amount) — ERC20 approve biasa
-      2. Permit2.approve(token, UNIVERSAL_ROUTER, amount, expiration)
-    Lihat ensure_v4_sell_approval(). DOKUMENTASI saja — JANGAN dieksekusi
-    dalam test / mode latihan.
+    Aset keluar = aset QUOTE pool (ETH native ATAU ERC20 seperti USDG),
+    ditentukan dari PoolKey — bukan hardcoded ETH. Untuk quote ERC20,
+    `value` = 0 dan hasil swap diterima sebagai ERC20 (TAKE_ALL currency
+    quote), jadi saldo masuk ke wallet sebagai USDG, bukan ETH.
     """
     pk = _as_poolkey(pool_key)
-    if pk.currency1 == ZERO_ADDRESS:
-        raise ValueError("encode_sell mengasumsikan token berada di currency1; "
-                         f"didapat currency1={pk.currency1}")
-    if pk.currency0 != ZERO_ADDRESS:
-        # D6: guard — sell ke ETH native hanya valid bila ETH = currency0.
-        raise ValueError("encode_sell menolak pool yang ETH tidak di currency0; "
-                         f"didapat currency0={pk.currency0}")
+    token = str(token_ca or pk.currency1).lower()
+    q = quote_asset(pk, token)
+    if q is None:
+        raise ValueError(f"PoolKey tidak memuat token {token}: {pk}")
+    token_is_c1 = _same_addr(pk.currency1, token)
+    zero_for_one = not token_is_c1     # jual = token → quote
     exact_in = (
         (pk.currency0, pk.currency1, pk.fee, pk.tickSpacing, pk.hooks),
-        False,                    # zeroForOne=False: token → ETH
+        zero_for_one,
         int(amount_in),
         int(min_out),
         bytes(hook_data),
@@ -542,8 +676,12 @@ def encode_sell(pool_key, amount_in, min_out, deadline=0, hook_data=b""):
     actions = bytes([ACT_SWAP_EXACT_IN_SINGLE, ACT_SETTLE_ALL, ACT_TAKE_ALL])
     params = [
         eth_abi_encode_exact_in(exact_in),
-        eth_abi_encode((pk.currency1, int(amount_in))),                 # SETTLE_ALL: token masuk
-        eth_abi_encode((ZERO_ADDRESS, int(min_out))),                   # TAKE_ALL: ETH keluar
+        # SETTLE_ALL: token yang kita setor
+        eth_abi_encode((pk.currency1 if token_is_c1 else pk.currency0,
+                        int(amount_in))),
+        # TAKE_ALL: quote yang kita terima (ETH native atau ERC20)
+        eth_abi_encode((pk.currency0 if token_is_c1 else pk.currency1,
+                        int(min_out))),
     ]
     inputs = [_encode_v4_input(actions, params)]
     return CMD_V4_SWAP, inputs, 0

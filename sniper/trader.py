@@ -218,16 +218,67 @@ class Trader:
         eth_in = buy_usd / eth_price
         wei_in = self.w3.to_wei(eth_in, "ether")
 
-        bal = self.w3.eth.get_balance(self.addr)
-        if bal < wei_in * 2:
-            raise RuntimeError(f"saldo ETH kurang: {bal/1e18:.6f} ETH")
-
         token = self.erc20(ca)
         dec = token.functions.decimals().call()
         try:
             sym = token.functions.symbol().call()
         except Exception:
             sym = pair.get("baseToken", {}).get("symbol", "?")
+
+        # ---------- skala input & saldo SESUAI aset quote pool ----------
+        # Pool v4 di chain ini TIDAK selalu ETH-quoted. Token Pons graduate
+        # memakai USDG (ERC20, 6 desimal) sebagai quote. Kode lama selalu
+        # mengirim 1e18 wei: untuk pool USDG itu berarti 5e18 unit = 5 TRILIUN
+        # USDG (bukan $5), quote membengkak ~1e12x, guard mcap on-chain buta
+        # (mcap terbaca $20 padahal $25.000), dan tx berisiko dana hangus.
+        # Skala & aset sekarang DIBACA dari PoolKey.
+        pool_id_buy = pair.get("pairAddress") if ptype == "v4" else None
+        pk_buy = None
+        q_asset = None
+        q_dec = 18
+        q_native = True
+        if ptype == "v4":
+            from . import v4 as v4mod0
+            # URUTAN WAJIB: cek likuiditas DULU. Pool kosong harus ditolak
+            # sebagai "liquidity 0" (alasan yang bisa ditindaklanjuti), bukan
+            # gagal di pencarian PoolKey yang membingungkan.
+            if not v4mod0.liquidity(pool_id_buy, self.w3):
+                raise RuntimeError(f"[skip] {sym} v4 liquidity 0 (pool kosong)")
+            pk_buy = v4mod0.pool_key(pool_id_buy, self.w3,
+                                     created_ms=pair.get("pairCreatedAt"))
+            if pk_buy is None:
+                raise RuntimeError(f"[skip] {sym} v4_poolkey_notfound (event "
+                                   f"Initialize tidak ketemu)")
+            q_asset = v4mod0.quote_asset(pk_buy, ca)
+            q_native = v4mod0._same_addr(q_asset, v4mod0.ZERO_ADDRESS)
+            if not q_native:
+                try:
+                    q_dec = int(self.erc20(q_asset).functions.decimals().call())
+                except Exception:
+                    raise RuntimeError(
+                        f"quote pool {q_asset} bukan ETH dan desimalnya tak "
+                        f"terbaca — BUY DIBATALKAN (skala salah = dana hangus)")
+
+        if ptype == "v4" and not q_native:
+            amount_in = int(round(eth_in * (10 ** q_dec)))
+            try:
+                erc_bal = int(self.erc20(q_asset).functions.balanceOf(
+                    self.addr).call())
+            except Exception:
+                erc_bal = 0
+            if erc_bal < amount_in:
+                raise RuntimeError(
+                    f"saldo quote kurang: butuh {amount_in} unit ("
+                    f"{amount_in / 10**q_dec:g}) dari {q_asset[:10]}…, ada "
+                    f"{erc_bal} — pool ini BUKAN ETH-quoted, isi saldo ERC20 "
+                    f"quote itu dulu (dana di wallet ETH tidak bisa dipakai)")
+        else:
+            amount_in = wei_in
+            bal = self.w3.eth.get_balance(self.addr)
+            if bal < wei_in * 2:
+                raise RuntimeError(f"saldo ETH kurang: {bal/1e18:.6f} ETH")
+
+        wei_in = amount_in
 
         price_native = float(pair.get("priceNative") or 0)
         expected = (eth_in / price_native) if price_native else 0
@@ -254,7 +305,7 @@ class Trader:
                 pool_id_probe = pair.get("pairAddress")
             ok_q, amt_q, _qerr = self.quote_buy_tokens(
                 ca, ptype_probe, fee_probe, wei_in, min_out=0,
-                pool_id=pool_id_probe)
+                pool_id=pool_id_probe, created_ms=pair.get("pairCreatedAt"))
             if ok_q and amt_q > 0:
                 min_out = int(amt_q * (1.0 - slippage))
         except Exception as e:
@@ -271,10 +322,11 @@ class Trader:
             liq = v4mod.liquidity(pool_id, self.w3)
             if not liq:  # 0 atau None → pool kosong / data tak terbaca
                 raise RuntimeError(f"[skip] {sym} v4 liquidity 0 (pool kosong)")
-            pk = v4mod.pool_key(pool_id, self.w3)
+            pk = v4mod.pool_key(pool_id, self.w3,
+                               created_ms=pair.get("pairCreatedAt"))
             if pk is None:
                 raise RuntimeError(f"[skip] {sym} v4_poolkey_notfound (event "
-                                   f"Initialize tidak ketemu dalam 200k blok)")
+                                   f"Initialize tidak ketemu)")
             fee = pk.fee
             # ---------- 🧊 PROBE JUAL SEBELUM BELI (v4) ----------
             # Pagar honeypot lama tidak berlaku untuk v4: _can_sell()
@@ -286,7 +338,8 @@ class Trader:
                 _est = 0
                 try:
                     _ok_q, _est, _ = self.quote_buy_tokens(
-                        ca, "v4", 0, wei_in, 0, pool_id=pool_id)
+                        ca, "v4", 0, wei_in, 0, pool_id=pool_id,
+                        created_ms=pair.get("pairCreatedAt"))
                     _est = int(_est or 0) if _ok_q else 0
                 except Exception:
                     _est = 0
@@ -303,7 +356,8 @@ class Trader:
                             f"kemungkinan token di-freeze/blacklist dev. BUY "
                             f"DIBATALKAN sebelum dana masuk")
             self._last_v4_pool_id = pool_id  # disimpan buat posisi/quote sell
-            commands, inputs, value = v4mod.encode_buy(pk, wei_in, min_out)
+            commands, inputs, value = v4mod.encode_buy(pk, wei_in, min_out,
+                                                       token_ca=ca)
             fn = self.w3.eth.contract(
                 Web3.to_checksum_address(v4mod.UNIVERSAL_ROUTER),
                 abi=v4mod.UNIVERSAL_ROUTER_ABI
@@ -366,7 +420,8 @@ class Trader:
             return False
 
     # ---------- quote BUY on-chain (paper-trading entry akurat) ----------
-    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None,
+                         created_ms=None, scale_from_usd=None):
         """Simulasi swap beli on-chain SEKARANG (eth_call / Quoter, TANPA tx).
 
         Return (ok, amount_out_tokens_raw, err_reason):
@@ -393,11 +448,30 @@ class Trader:
             liq = v4mod.liquidity(pool_id, self.w3)
             if liq is not None and liq <= 0:
                 return False, 0, "v4_quoter_not_enough_liquidity:pool kosong"
-            pk = v4mod.pool_key(pool_id, self.w3)
+            pk = v4mod.pool_key(pool_id, self.w3, created_ms=created_ms)
             if pk is None:
                 return False, 0, "v4_quoter_error:poolkey_notfound"
+            # ---- skala input dari ASET QUOTE pool (bukan asumsi 1e18) ----
+            # Pool USDG (6 desimal) butuh amount_in 1e6, bukan 1e18; kalau
+            # salah, hasil quote membengkak ~1e12x → guard mcap on-chain
+            # lolos padahal harga asli sudah pucuk.
+            q_asset = v4mod.quote_asset(pk, ca)
+            q_native = v4mod._same_addr(q_asset, v4mod.ZERO_ADDRESS)
+            amount_in = int(wei_in)
+            if not q_native:
+                q_dec = 18
+                try:
+                    q_dec = int(self.erc20(q_asset).functions.decimals().call())
+                except Exception as e:
+                    return False, 0, f"v4_quoter_error:quote_decimals:{e}"
+                if scale_from_usd is not None:
+                    amount_in = int(round(float(scale_from_usd) *
+                                          (10 ** q_dec)))
+                else:
+                    amount_in = int(round((int(wei_in) / 1e18) *
+                                          (10 ** q_dec)))
             try:
-                res = v4mod.quote_buy(pk, int(wei_in), self.w3)
+                res = v4mod.quote_buy(pk, amount_in, self.w3)
             except Exception as e:
                 return False, 0, f"v4_quoter_error:{e}"
             if not res.ok:
@@ -429,7 +503,8 @@ class Trader:
                 if (min_out and out < int(min_out)) else (True, int(out), "")
 
     # ---------- quote (verifikasi TP anti-wick) ----------
-    def quote_sell_eth(self, ca, ptype, fee, amount_raw, pool_id=None) -> float:
+    def quote_sell_eth(self, ca, ptype, fee, amount_raw, pool_id=None,
+                       created_ms=None) -> float:
         """Berapa ETH BENERAN yang bakal didapat kalau jual amount_raw sekarang.
         v3: static-call exactInputSingle (butuh allowance — sudah di-approve saat buy).
         v2: getAmountsOut (pure view).
@@ -445,7 +520,7 @@ class Trader:
             liq = v4mod.liquidity(pool_id, self.w3)
             if liq is not None and liq <= 0:
                 return 0.0
-            pk = v4mod.pool_key(pool_id, self.w3)
+            pk = v4mod.pool_key(pool_id, self.w3, created_ms=created_ms)
             if pk is None:
                 return 0.0
             res = v4mod.quote_sell(pk, int(amount_raw), self.w3)

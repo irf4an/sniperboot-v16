@@ -123,33 +123,41 @@ check("TAKE_ALL currency = ETH native (terima ETH)", sell_take[0] == ETH)
 print("\n=== 4. guard arah ===")
 pk_wc = v4.PoolKey(GROK_CA, ETH, 10000, 200,
                    "0x0000000000000000000000000000000000000000")
-try:
-    v4.encode_buy(pk_wc, 10, 1)
-    check("encode_buy raises dgn currency1=0x0", False)
-except ValueError as e:
-    check("encode_buy menolak currency0≠0x0",
-          "encode_buy" in str(e) or "unsupported_native_side" in str(e))
-try:
-    v4.encode_sell(v4.PoolKey(GROK_CA, GROK_CA, 10000, 200,
-                              "0x0000000000000000000000000000000000000000"),
-                   10, 1)
-    check("encode_sell salah arah → tidak raise", False)
-except ValueError:
-    check("encode_sell menolak currency1=0x0", True)
-# D6 eksplisit: currency0 != 0x0 → tolak
-try:
-    v4.encode_sell(v4.PoolKey(GROK_CA, "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-                              10000, 200, ETH), 10, 1)
-    check("encode_sell dgn currency0≠0x0 → tidak raise", False)
-except ValueError:
-    check("encode_sell menolak currency0≠ZERO_ADDRESS (D6)", True)
-# D5 eksplisit: token di currency0 → unsupported_native_side
+# ---- D5/D6 DIPERBARUI: pool tidak lagi diasumsikan ETH-quoted ----
+# Pool v4 di chain ini sering memakai ERC20 (USDG, 6 desimal) sebagai quote.
+# Aturan sekarang: arah swap & aset ditentukan dari PoolKey; PoolKey yang
+# ambigu (kedua sisi sama) WAJIB ditolak karena tidak ada token yang jelas.
 try:
     v4.encode_buy(v4.PoolKey(GROK_CA, GROK_CA, 10000, 200, ETH), 10, 1)
-    check("encode_buy token di currency0 → tidak raise", False)
+    check("encode_buy PoolKey ambigu → raise", False)
 except ValueError as e:
-    check("encode_buy token di currency0 → unsupported_native_side",
-          "unsupported_native_side" in str(e), str(e))
+    check("encode_buy menolak PoolKey ambigu (token tak jelas)",
+          "tidak memuat token" in str(e), str(e))
+
+try:
+    v4.encode_sell(v4.PoolKey(GROK_CA, GROK_CA, 10000, 200, ETH), 10, 1)
+    check("encode_sell PoolKey ambigu → raise", False)
+except ValueError:
+    check("encode_sell menolak PoolKey ambigu", True)
+
+# Pool ERC20-quote (currency0 = USDG ERC20, currency1 = token) HARUS bisa
+# di-encode: ini kasus nyata token Pons yang graduate. value wajib 0 karena
+# input bukan ETH native.
+USDG_TEST = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+TOK_TEST = "0xe0bcf5d80435781aae7f6dcde202bb1ccb9c7d89"
+pk_usdg = v4.PoolKey(USDG_TEST, TOK_TEST, 0, 200, ETH)
+_cmds, _inp, _val = v4.encode_buy(pk_usdg, 5 * 10**6, 1, token_ca=TOK_TEST)
+check("encode_buy pool USDG → value 0 (bukan ETH)", _val == 0, str(_val))
+check("encode_buy pool USDG → commands V4_SWAP", _cmds == v4.CMD_V4_SWAP)
+check("quote_asset pool USDG → USDG", v4.quote_asset(pk_usdg, TOK_TEST).lower()
+      == USDG_TEST.lower())
+check("is_native pool USDG → False", v4.is_native(pk_usdg) is False)
+
+# Pool ETH native (currency0 = 0x0) tetap harus jalan dan value = amount_in
+pk_eth = v4.PoolKey(ETH, TOK_TEST, 10000, 200, ETH)
+_c2, _i2, _v2 = v4.encode_buy(pk_eth, 10**17, 1, token_ca=TOK_TEST)
+check("encode_buy pool ETH → value = amount_in", _v2 == 10**17, str(_v2))
+check("is_native pool ETH → True", v4.is_native(pk_eth) is True)
 
 # ============================================================
 # 5. _is_pool_id + Permit2 helper (D3/D4)

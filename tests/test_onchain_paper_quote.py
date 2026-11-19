@@ -105,7 +105,7 @@ def fake_liquidity_ok(pool_id, w3):
     return 123456
 
 
-def fake_pool_key_ok(pool_id, w3):
+def fake_pool_key_ok(pool_id, w3, created_ms=None):
     return v4mod.PoolKey(v4mod.ZERO_ADDRESS_F, CA, 500, 20,
                          v4mod.ZERO_ADDRESS_F)
 

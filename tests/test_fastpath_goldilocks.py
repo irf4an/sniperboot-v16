@@ -197,7 +197,8 @@ class QuoterOkEarly(FakeTrader):
                     return B()
         return E()
 
-    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None,
+                         created_ms=None, scale_from_usd=None):
         return True, 5000 * 10**18, ""
 
 
@@ -254,7 +255,8 @@ class QuoterRunner(FakeTrader):
                     return G()
         return E()
 
-    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None,
+                         created_ms=None, scale_from_usd=None):
         # min_out DIBIARKAN 0 — quoter benci min_out dari harga layar basi
         assert min_out == 0, f"spot probe harus min_out=0, dapat {min_out}"
         return True, self.amt * 10**18, ""
@@ -302,7 +304,8 @@ class QuoterBurned(FakeTrader):
                     return B()
         return E()
 
-    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None,
+                         created_ms=None, scale_from_usd=None):
         # DIFC-style: $5 ambil 33.378 token → harga ~$0.0001498
         return True, self.amt * 10**18, ""
 
@@ -319,7 +322,8 @@ check(" supply yang dipakai bukan totalSupply mentah (kalaupun FDV 1 Miliar → 
 
 
 class QuoterBurned2(QuoterBurned):
-    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None,
+                         created_ms=None, scale_from_usd=None):
         return True, 5000 * 10**18, ""
 
 listener._trader = QuoterBurned2(supply=25_000_000, burned=0)
@@ -360,7 +364,8 @@ class QuoterFail(FakeTrader):
     def erc20(self, addr_):
         return Dec18ERC20(addr_)
 
-    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None,
+                         created_ms=None, scale_from_usd=None):
         return False, 0, "v3_quoter_not_enough_liquidity:kosong"
 
 
@@ -394,7 +399,8 @@ class QuoterOk(FakeTrader):
                     return G()
         return E()
 
-    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None):
+    def quote_buy_tokens(self, ca, ptype, fee, wei_in, min_out=0, pool_id=None,
+                         created_ms=None, scale_from_usd=None):
         # expected 5000 token, min_out 4250 → quote di atas ambang → OK
         return True, 5000 * 10**18, ""
 
