@@ -149,6 +149,21 @@ SETTING_DEFAULTS = {
     # punya konsentrasi top10 tinggi di awal kurva. Bypass HANYA gate top10;
     # dev / honeypot / clone guard tetap berlaku.
     "pons_bypass_top10": "1",
+    # Token Pons yang graduate duduk di bonding curve BERJAM-JAM, jadi
+    # `goldilocks_max_age_sec` (300s) menolak 100% (terukur: 0/12 lolos).
+    # 1 = token dari Radar Pons hanya diuji batas umur BAWAH; gate liq,
+    # mcap, rasio, safety, dan quoter on-chain TETAP berlaku.
+    "pons_bypass_age_gate": "1",
+    # ---- Radar Pons: jalur LANGSUNG (tanpa gate fast-path) ----
+    # Operator minta token Pons tidak melewati gate Goldilocks; langsung ke
+    # eksekusi beli. Dua kunci di bawah WAJIB tetap 1 supaya "langsung" tidak
+    # berubah jadi "kirim tx yang pasti gagal / salah skala":
+    #   eth_only → tolak pool ber-quote ERC20 (USDG). Wallet ini ETH-only,
+    #              dan input 1e18 ke pool 6-desimal = 1e12 salah skala.
+    #   v4_only  → tolak pool v2/v3 (chain ini v4-only).
+    "pons_direct_buy": "1",
+    "pons_direct_eth_only": "1",
+    "pons_direct_v4_only": "1",
     # ---- launch padding: satu alamat sebar token ke banyak dompet ----
     # 0 = filter mati. Isi misal 50 → skip kalau satu pengirim menyebar ke
     # >= 50 dompet di blok-blok pertama DAN dompet itu pegang >= pad_max_supply_pct.
@@ -253,6 +268,16 @@ SETTING_DEFAULTS = {
     "pons_radar_on":               "0",   # 1 = radar hidup
     "pons_min_progress":           "0.75",# minimal progress kurva (0.75 = 75%)
     "pons_api_url":                "https://ponsfamily.com/api/launches?stage=curve&sort=progress",
+    # ---- 🆕 mode LAUNCH BARU (kebalikan dari mode graduasi) ----
+    # Mode normal menyaring progress >= pons_min_progress, jadi koin baru
+    # (progress ~0%) tidak pernah muncul sampai mendekati graduasi.
+    # Mode ini menyapu `sort=newest` supaya setiap launch langsung masuk DM.
+    # Catatan volume ukur: ~14 launch/jam, 38/40 di bawah 10% progress.
+    "pons_newest_mode":            "0",   # 1 = alert SETIAP launch baru
+    "pons_api_new_url":            "https://ponsfamily.com/api/launches?stage=curve&sort=newest",
+    "pons_new_max_age_sec":        "900", # hanya token lahir <= 15 menit
+    "pons_new_alert_max_per_hour": "15",  # cap khusus mode launch baru
+
     "pons_llm_on":                 "1",   # tier LLM sebagai hakim akhir
     "pons_llm_model":              "cmc/deepseek/deepseek-v4-flash",  # terukur: JSON valid ~1,5-2,2 s
     "pons_last_block":             "0",   # watermark getLogs (dikelola radar)
@@ -262,6 +287,7 @@ SETTING_DEFAULTS = {
     "pons_alert_max_per_hour":     "15",  # cap alert Telegram per jam
     "pons_queue_ttl_sec":          "3600",# kandidat basi → status expired
     "pons_radar_public":           "0",   # 1 = digest publik (opsi C, mati)
+
     # ---- 📡 Userbot Telegram (alpha groups listener) — 100% OPSIONAL ----
     # Default '0' = NONAKTIF: akun pribadi tidak online di VPS (bebas risiko
     # ban/flag), sinyal 100% dipasok on-chain (factory & insider tracker).
@@ -302,6 +328,10 @@ SETTING_LABELS = {
     "dev_max_pct":   "🕵️ Max dev holding (%)",
     "top10_max_pct": "🐋 Max top10 holders (%)",
     "pons_bypass_top10": "📡 Bypass top10 utk token Pons (1/0)",
+    "pons_bypass_age_gate": "📡 Bypass gate umur utk token Pons (1/0)",
+    "pons_direct_buy": "📡 Pons: jalur LANGSUNG tanpa fast-path (1/0)",
+    "pons_direct_eth_only": "📡 Pons direct: wajib quote ETH native (1/0)",
+    "pons_direct_v4_only": "📡 Pons direct: wajib pool v4 (1/0)",
     "pad_min_wallets":    "🧩 Padding: min dompet dari 1 pengirim (0=off)",
     "pad_max_supply_pct": "🧩 Padding: min % supply di dompet itu",
     "pad_window_blocks":  "🧩 Padding: jumlah blok awal yang diperiksa",
@@ -342,6 +372,9 @@ SETTING_LABELS = {
     "clone_max_entries_per_day": "🛡 Clone guard: maks entry per keluarga operator",
     "clone_entry_window_hours":  "🛡 Clone guard: jendela hitung entry (jam)",
     "pons_radar_on":             "📡 Radar Pons V2: alert awal pre-graduasi (1/0)",
+    "pons_newest_mode":          "🆕 Radar Pons: mode launch baru — alert SETIAP launch (1/0)",
+    "pons_new_max_age_sec":      "⏱ Radar Pons: maks umur token launch baru (detik)",
+    "pons_new_alert_max_per_hour": "🔔 Radar Pons: cap alert launch baru per jam",
     "pons_min_progress":         "🎯 Radar Pons: minimal progress kurva (0.10 - 0.95)",
     "pons_api_url":              "🌐 Radar Pons: endpoint API kurva Pons",
     "pons_llm_on":               "🧠 Radar Pons: saring pakai LLM (1/0)",

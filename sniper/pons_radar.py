@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from . import agent, config, db
 
 NAME_CLUSTER_WINDOW_SEC = 3600
+NEW_LAUNCH_WINDOW_SEC = 900  # token dianggap "baru" bila lahir <= 15 menit
 _VOWELS = set("aeiou")
 
 _w3_cache = {"w3": None, "ts": 0.0}
@@ -45,15 +46,6 @@ _w3_lock = threading.Lock()
 
 _notify_cb = None
 _public_notify_cb = None
-
-# ==================== veto jalur beli (0 ms) ====================
-# Listener memanggil `is_blacklisted(ca)` di awal fast-path. Set ini
-# diperbarui `blacklist_loop` tiap 30 detik, jadi jalur beli TIDAK melakukan
-# query DB per kandidat — cukup satu cek keanggotaan set di memori.
-_blacklist = set()
-_blacklist_ts = 0.0
-BLACKLIST_REFRESH_SEC = 30
-
 
 # ==================== plumbing notifikasi ====================
 def bind_notify(notify, public_notify=None):
@@ -64,33 +56,6 @@ def bind_notify(notify, public_notify=None):
         _notify_cb = notify
     if public_notify is not None:
         _public_notify_cb = public_notify
-
-
-# ==================== veto jalur beli ====================
-def refresh_blacklist(force=False) -> int:
-    """Muat ulang set veto dari DB. Return jumlah CA yang diblokir."""
-    global _blacklist, _blacklist_ts
-    now = time.time()
-    if not force and _blacklist_ts and now - _blacklist_ts < BLACKLIST_REFRESH_SEC:
-        return len(_blacklist)
-    try:
-        _blacklist = db.get_pons_blocked_cas()
-        _blacklist_ts = now
-    except Exception as e:
-        print(f"[pons-radar] refresh blacklist gagal (pakai set lama): {e}")
-    return len(_blacklist)
-
-
-def is_blacklisted(ca) -> bool:
-    """O(1). True = koin diveto Radar Pons saat masih di bonding curve.
-
-    Dipanggil listener di awal fast-path SEBELUM gate matematika. Panggilan
-    pertama per proses bisa memicu satu query DB (~1 ms) bila loop refresh
-    belum sempat jalan; setelah itu murni lookup set.
-    """
-    if not _blacklist_ts:
-        refresh_blacklist()
-    return str(ca or "").strip().lower() in _blacklist
 
 
 async def _send_alert(text, buttons=None):
@@ -283,6 +248,60 @@ def compose_alert(rec: dict) -> str:
     return "\n".join(lines)
 
 
+def compose_new_launch(rec: dict) -> str:
+    """Susun alert untuk token yang BARU LAHIR di kurva Pons.
+
+    Beda dari `compose_alert`: tidak ada skor/verdict (belum dinilai), dan
+    yang ditekankan justru umur token — makin cepat dibaca, makin berguna.
+    """
+    sym = rec.get("symbol") or "?"
+    name = rec.get("name") or ""
+    ca = rec.get("ca") or ""
+    dep = rec.get("deployer") or ""
+    age = rec.get("age_sec")
+    vol = rec.get("volume_usd")
+    trades = rec.get("trade_count")
+    mcap = rec.get("market_cap_usd")
+    prog = rec.get("progress")
+    tax = rec.get("creator_tax_bps")
+    dev_launches = rec.get("deployer_launches")
+
+    head = f"🆕 **LAUNCH BARU — PONS**\n**{sym}**"
+    if name and name.strip().lower() != str(sym).lower():
+        head += f" · {name}"
+    lines = [head, f"`{ca}`", ""]
+
+    if age is not None and age >= 0:
+        lines.append(f"⏱ umur **{int(age) // 60}m {int(age) % 60}s**")
+    m_parts = []
+    if prog is not None:
+        m_parts.append(f"kurva {round(float(prog) * 100, 1)}%")
+    if vol:
+        m_parts.append(f"Vol ${float(vol):,.0f}")
+    if trades:
+        m_parts.append(f"{int(trades):,} trade")
+    if mcap:
+        m_parts.append(f"MCap ${float(mcap):,.0f}")
+    if m_parts:
+        lines.append("📊 " + " · ".join(m_parts))
+
+    if dep:
+        short = dep[:6] + "…" + dep[-4:]
+        dev_line = f"👤 dev `{short}`"
+        if tax is not None:
+            dev_line += f" · Tax {float(tax)/100:.1f}%"
+        if dev_launches is not None:
+            dev_line += f" · {int(dev_launches)} launch 1 jam"
+        lines.append(dev_line)
+
+    if age is not None and int(age) < NEW_LAUNCH_WINDOW_SEC:
+        lines.append("🚨 masih sangat awal — belum ada pool DEX")
+    else:
+        lines.append("📈 pool DEX belum ada — pantau graduasi")
+    lines.append("_alert-only: bot tidak membeli otomatis_")
+    return "\n".join(lines)
+
+
 def compose_digest(rows) -> str | None:
     """Rekap publik per jam (opsi C). None bila tidak ada alert."""
     rows = list(rows or [])
@@ -312,6 +331,67 @@ def _explorer_buttons(ca):
         return None
 
 
+def _graduation_buttons(ca):
+    """Tombol saat koin lolos ke DEX: aksi Beli + URL referensi.
+
+    Beli TIDAK langsung dieksekusi — callback `ponsbuy:<ca>` membuka
+    konfirmasi dulu (human-in-the-loop), baru masuk `process_ca`.
+    """
+    try:
+        from telethon import Button
+        return [
+            [Button.inline("🟢 Beli Sekarang", data=f"ponsbuy:{ca}")],
+            [
+                Button.url("📊 Chart", f"https://dexscreener.com/robinhood/{ca}"),
+                Button.url("🔍 Explorer", f"{config.EXPLORER_URL}/token/{ca}"),
+            ],
+        ]
+    except Exception:
+        return None
+
+
+def compose_graduated_alert(rec: dict, state: dict) -> str:
+    """Teks notif 'lolos ke DEX' untuk koin yang dulu di-alert di kurva."""
+    sym = rec.get("symbol") or "?"
+    name = rec.get("name") or ""
+    ca = rec.get("ca") or ""
+    score = rec.get("score")
+    prog = rec.get("progress")
+    mcap = state.get("marketCapUsd")
+    vol = state.get("volumeUsd")
+    trades = state.get("tradeCount")
+    price = state.get("priceUsd")
+
+    def _usd(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return "?"
+        if v >= 1_000_000:
+            return "$%.2fM" % (v / 1_000_000)
+        if v >= 1_000:
+            return "$%.1fK" % (v / 1_000)
+        return "$%.0f" % v
+
+    lines = [
+        "🚀 **LOLOS KE DEX — %s**" % sym,
+        ("_%s_" % name) if name else "",
+        "`%s`" % ca,
+        "",
+        "Sinyal Radar Pons sudah **graduated** dan kini punya pool DEX.",
+        "",
+        "Kurva saat alert : %s" % (("%.1f%%" % (float(prog) * 100)) if prog else "?"),
+        "Skor radar       : %s" % (score if score is not None else "?"),
+        "Harga            : %s" % (("$%.8g" % float(price)) if price else "?"),
+        "Mcap             : %s" % _usd(mcap),
+        "Volume           : %s" % _usd(vol),
+        "Trade            : %s" % (trades if trades is not None else "?"),
+        "",
+        "_Tekan tombol di bawah untuk beli lewat jalur normal bot._",
+    ]
+    return "\n".join([x for x in lines if x is not None])
+
+
 # ==================== I/O: API Kurva Pons & RPC ====================
 def fetch_curve_candidates(url=None) -> list:
     """Tarik daftar kandidat kurva Pons V2 dari API."""
@@ -328,6 +408,45 @@ def fetch_curve_candidates(url=None) -> list:
     except Exception as e:
         print(f"[pons-radar] fetch API kurva gagal (lanjut): {e}")
     return []
+
+
+def fetch_token_state(ca) -> dict:
+    """Status satu token dari API Pons. {} bila gagal/tidak ada."""
+    ca = (ca or "").strip()
+    if not ca:
+        return {}
+    base = (db.get("pons_api_url", str) or
+            "https://ponsfamily.com/api/launches?stage=curve&sort=progress")
+    base = base.split("?")[0].rstrip("/")
+    url = f"{base}/{ca}"
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; Hoodsniper/16.10)"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                return {}
+            d = json.loads(resp.read().decode("utf-8"))
+        # API bisa balas objek langsung atau {"item": {...}}
+        if isinstance(d, dict) and "items" in d:
+            items = d.get("items") or []
+            return items[0] if items else {}
+        if isinstance(d, dict) and isinstance(d.get("item"), dict):
+            return d["item"]
+        return d if isinstance(d, dict) else {}
+    except Exception as e:
+        print(f"[pons-radar] fetch state {ca[:10]}… gagal (lanjut): {e}")
+        return {}
+
+
+def is_graduated(state) -> bool:
+    """True bila token sudah keluar dari bonding curve (punya pool DEX)."""
+    if not isinstance(state, dict) or not state:
+        return False
+    if str(state.get("stage") or "").lower() == "graduated":
+        return True
+    if state.get("graduatedAt"):
+        return True
+    return bool(state.get("poolId")) and str(state.get("stage") or "").lower() != "curve"
 
 
 def scan_curve_progress() -> int:
@@ -389,6 +508,87 @@ def scan_curve_progress() -> int:
     if new_count:
         print(f"[pons-radar] {new_count} kandidat kurva baru (progress >= {min_prog*100:.0f}%)")
     return new_count
+
+
+def scan_new_launches() -> list:
+    """Sapu `sort=newest` → baris DB untuk token yang BARU LAHIR.
+
+    Mode normal (`scan_curve_progress`) menyaring progress >= ambang dan
+    karena API sudah progress DESC, token umur 3 menit tidak pernah lolos.
+    Fungsi ini justru mengambil ekor API: urut terbaru, saring umur.
+
+    Return list record siap alert (hanya yang benar-benar baru & belum
+    pernah dikirim). Penolakan di sini TIDAK memblokir jalur beli.
+    """
+    url = db.get("pons_api_new_url", str) or \
+        "https://ponsfamily.com/api/launches?stage=curve&sort=newest"
+    items = fetch_curve_candidates(url)
+    if not items:
+        return []
+
+    max_age = int(db.get("pons_new_max_age_sec", int) or NEW_LAUNCH_WINDOW_SEC)
+    cap = int(db.get("pons_new_alert_max_per_hour", int) or 0)
+    now = int(time.time())
+    out = []
+
+    # API sort=newest → terbaru di depan. Iterasi urut waktu terbit.
+    for item in sorted(items, key=lambda x: -(float(x.get("createdAt") or 0))):
+        try:
+            created_at = int(item.get("createdAt") or 0)
+            if created_at and (now - created_at) > max_age:
+                continue  # sudah basi, bukan "launch baru" lagi
+            ca = (item.get("address") or "").strip().lower()
+            if not ca:
+                continue
+            if db.pons_seen_for_new_launch(ca):
+                continue  # sudah pernah dibangunkan / sudah alerted
+            deployer = (item.get("deployer") or "").strip().lower()
+            curve = (item.get("curve") or "").strip().lower()
+            symbol = str(item.get("symbol") or "")[:32]
+            name = str(item.get("name") or "")[:64]
+            total_supply = float(item.get("totalSupply") or 0.0)
+            launch_block = int(item.get("launchedBlock") or item.get("deployedBlock") or 0)
+            prog = float(item.get("progress") or 0.0)
+            vol = float(item.get("volumeUsd") or 0.0)
+            trades = int(item.get("tradeCount") or 0)
+            mcap = float(item.get("marketCapUsd") or 0.0)
+            tax = int(item.get("creatorTaxBps") or 0)
+            socials = json.dumps(item.get("socials") or {})
+            quote = item.get("quote") or {}
+            quote_symbol = str(quote.get("symbol") or "")[:24]
+            quote_asset_class = str(quote.get("assetClass") or "")[:16]
+            threshold_quote = float(item.get("thresholdQuote") or 0.0)
+            raised = float(item.get("raisedQuote") or 0.0)
+            raised_usd = float(item.get("raisedUsd") or 0.0)
+
+            db.upsert_pons_curve_candidate(
+                ca=ca, deployer=deployer, curve=curve, launch_block=launch_block,
+                launch_ts=created_at or now, symbol=symbol, name=name,
+                total_supply=total_supply, progress=prog, volume_usd=vol,
+                trade_count=trades, market_cap_usd=mcap, raised_eth=raised,
+                creator_tax_bps=tax, socials=socials,
+                quote_symbol=quote_symbol, quote_asset_class=quote_asset_class,
+                threshold_quote=threshold_quote, raised_usd=raised_usd
+            )
+            hist = db.pons_deployer_history(deployer)
+            out.append({
+                "ca": ca, "symbol": symbol, "name": name,
+                "deployer": deployer, "launch_block": launch_block,
+                "launch_ts": created_at or now,
+                "age_sec": now - (created_at or now),
+                "progress": prog, "volume_usd": vol, "trade_count": trades,
+                "market_cap_usd": mcap, "creator_tax_bps": tax,
+                "deployer_launches": hist.get("launches", 0),
+            })
+        except Exception as e:
+            print(f"[pons-radar] parse launch baru error: {e}")
+            continue
+
+    if cap > 0 and len(out) > cap:
+        print(f"[pons-radar] launch baru {len(out)} melebihi cap {cap}/jam — "
+              f"sisanya ditahan")
+        out = out[:cap]
+    return out
 
 
 def _w3():
@@ -623,7 +823,7 @@ def process_candidates(batch) -> list:
             if llm["verdict"] == "BUANG":
                 db.reject_pons(ca, f"LLM BUANG: {llm['reason'] or '-'}",
                                score=final, verdict="BUANG",
-                               llm_model=llm["model"], block_buy=True)
+                               llm_model=llm["model"])
                 continue
         else:
             work.update({"score": heur, "verdict": "WASPADA",
@@ -632,8 +832,7 @@ def process_candidates(batch) -> list:
 
         if work["score"] < min_score:
             db.reject_pons(ca, f"skor {work['score']} < {min_score}",
-                           score=work["score"], verdict=work["verdict"],
-                           block_buy=True)
+                           score=work["score"], verdict=work["verdict"])
             continue
         if cap_left is not None and cap_left <= 0:
             db.reject_pons(ca, "cap alert per jam penuh", score=work["score"],
@@ -652,28 +851,57 @@ def process_candidates(batch) -> list:
 
 
 # ==================== loop ====================
-async def blacklist_loop():
-    """Warm-up + refresh set veto tiap 30 s.
+async def graduation_loop():
+    """Pantau koin ALERTED yang sudah graduate → kirim notif + tombol Beli.
 
-    Jalan TANPA peduli `pons_radar_on`: kalau radar dimatikan, veto yang
-    sudah ada tetap berlaku di jalur beli.
+    Radar menangkap koin saat masih di bonding curve (belum ada pool DEX).
+    Loop ini menutup jarak itu: begitu `stage=graduated`, admin dapat
+    pesan baru dengan tombol Beli. Tombol tetap butuh konfirmasi.
     """
-    await asyncio.sleep(5)
+    await asyncio.sleep(45)
+    interval = 120
+    window = 86400  # hanya alert <= 24 jam yang masih relevan
+    suppressed = False
     while True:
         try:
-            n = await asyncio.to_thread(refresh_blacklist, True)
-            if n:
-                print(f"[pons-radar] veto aktif: {n} CA diblokir")
-            await asyncio.sleep(BLACKLIST_REFRESH_SEC)
+            if db.get("pons_radar_on", str) != "1":
+                await asyncio.sleep(30)
+                continue
+            if _notify_cb is None:
+                await asyncio.sleep(15)
+                continue
+            if not suppressed:
+                n = await asyncio.to_thread(db.suppress_stale_pons_graduation, window)
+                if n:
+                    print(f"[pons-radar] {n} alert lama dibungkam (backlog historis)")
+                suppressed = True
+            rows = db.pons_alerted_for_graduation(limit=25, max_age_sec=window)
+            for rec in rows:
+                ca = rec.get("ca")
+                state = await asyncio.to_thread(fetch_token_state, ca)
+                if not is_graduated(state):
+                    continue
+                sent = await _send_alert(compose_graduated_alert(rec, state),
+                                         buttons=_graduation_buttons(ca))
+                if sent:
+                    db.mark_pons_graduated(ca, pool_id=state.get("poolId"))
+                    print(f"[pons-radar] GRADUATED {rec.get('symbol')} "
+                          f"({str(ca)[:12]}…) — tombol beli dikirim")
+            await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[pons-radar] blacklist loop error (lanjut): {e}")
-            await asyncio.sleep(BLACKLIST_REFRESH_SEC)
+            print(f"[pons-radar] graduation loop error (lanjut): {e}")
+            await asyncio.sleep(60)
 
 
 async def radar_loop():
-    """Loop radar. Default MATI (`pons_radar_on=0`) — nyalakan dari settings."""
+    """Loop radar. Default MATI (`pons_radar_on=0`) — nyalakan dari settings.
+
+    Dua mode yang bisa hidup bersamaan:
+    - `pons_newest_mode=1` → alert SETIAP launch baru (sort=newest).
+    - mode graduasi → progress >= `pons_min_progress` (sort=progress).
+    """
     print("[pons-radar] loop siap — alert-only, TIDAK masuk pipa beli")
     await asyncio.sleep(10)
     while True:
@@ -684,26 +912,49 @@ async def radar_loop():
             if _notify_cb is None:
                 await asyncio.sleep(15)
                 continue
-            await asyncio.to_thread(scan_curve_progress)
-            db.expire_pons_queue(int(db.get("pons_queue_ttl_sec", int)))
-            batch = db.get_pons_pending(int(db.get("pons_max_per_cycle", int)))
-            if batch:
-                alerts = await asyncio.to_thread(process_candidates, batch)
-                for rec in alerts:
-                    sent = await _send_alert(compose_alert(rec),
+
+            newest_mode = db.get("pons_newest_mode", str) == "1"
+            if newest_mode:
+                fresh = await asyncio.to_thread(scan_new_launches)
+                for rec in fresh:
+                    sent = await _send_alert(compose_new_launch(rec),
                                              buttons=_explorer_buttons(rec["ca"]))
                     if sent:
                         db.mark_pons_alerted(
                             rec["ca"], symbol=rec.get("symbol"),
-                            name=rec.get("name"), score=rec.get("score"),
-                            verdict=rec.get("verdict"),
-                            reason=rec.get("reason"),
-                            llm_model=rec.get("llm_model"))
-                        prog_info = f" kurva {round((rec.get('progress') or 0)*100)}%" if rec.get("progress") else ""
-                        print(f"[pons-radar] ALERT {rec.get('symbol')} "
-                              f"({rec['ca'][:12]}…) skor {rec.get('score')}{prog_info}")
-                print(f"[pons-radar] diproses={len(batch)} alert={len(alerts)}")
-            await asyncio.sleep(20)
+                            name=rec.get("name"), score=0, verdict="BARU",
+                            reason=f"launch baru {int(rec.get('age_sec') or 0)}s")
+                        print(f"[pons-radar] LAUNCH BARU {rec.get('symbol')} "
+                              f"({rec['ca'][:12]}…) umur "
+                              f"{int(rec.get('age_sec') or 0)}s")
+                if fresh:
+                    print(f"[pons-radar] launch baru dikirim={len(fresh)}")
+
+            if not newest_mode:
+                # Mode graduasi hanya jalan kalau mode launch baru MATI.
+                # Kalau keduanya hidup, DM akan dobel untuk koin yang sama.
+                await asyncio.to_thread(scan_curve_progress)
+                db.expire_pons_queue(int(db.get("pons_queue_ttl_sec", int)))
+                batch = db.get_pons_pending(int(db.get("pons_max_per_cycle", int)))
+                if batch:
+                    alerts = await asyncio.to_thread(process_candidates, batch)
+                    for rec in alerts:
+                        sent = await _send_alert(compose_alert(rec),
+                                                 buttons=_explorer_buttons(rec["ca"]))
+                        if sent:
+                            db.mark_pons_alerted(
+                                rec["ca"], symbol=rec.get("symbol"),
+                                name=rec.get("name"), score=rec.get("score"),
+                                verdict=rec.get("verdict"),
+                                reason=rec.get("reason"),
+                                llm_model=rec.get("llm_model"))
+                            prog_info = f" kurva {round((rec.get('progress') or 0)*100)}%" if rec.get("progress") else ""
+                            print(f"[pons-radar] ALERT {rec.get('symbol')} "
+                                  f"({rec['ca'][:12]}…) skor {rec.get('score')}{prog_info}")
+                    print(f"[pons-radar] diproses={len(batch)} alert={len(alerts)}")
+
+            # Launch baru lebih sensitif waktu → siklus lebih rapat.
+            await asyncio.sleep(15 if newest_mode else 20)
         except asyncio.CancelledError:
             raise
         except Exception as e:

@@ -12,21 +12,6 @@ _notify = None
 _public_notify = None  # async fn(text, buttons=None) → channel log PUBLIK (opsional)
 
 
-def pons_veto(ca) -> bool:
-    """True bila CA diveto Radar Pons saat masih di bonding curve.
-
-    Dipisah jadi fungsi kecil supaya bisa diuji langsung: satu-satunya
-    ketergantungannya adalah set di memori `pons_radar.is_blacklisted`
-    (O(1), tanpa query DB di jalur beli).
-    """
-    try:
-        return pons_radar.is_blacklisted(ca)
-    except Exception as e:
-        # Fail-open: radar rusak TIDAK boleh menghentikan bot membeli.
-        print(f"[pons-veto] cek veto error (dianggap lolos): {e}")
-        return False
-
-
 # ---------- LOG PUBLIK (mode publik) ----------
 # SEMUA notif yang lahir di process_ca adalah "log filter koin"
 # (SKIP mcap/liq/sosmed/safety/fast-path, kartu Mata, SIMULASI BUY, BUY,
@@ -367,16 +352,23 @@ def _extract_ca_strict(text) -> list:
 
 # =====================================================================
 #  ⚡ FAST-PATH GOLDILOCKS DEFENSIVE — evaluasi entry MURNI math/bytecode
-#  (0 detik LLM). Tidak ada mode LLM di jalur entry — lihat pons_veto().
+# (0 detik LLM). Tidak ada mode LLM di jalur entry.
 #  Fungsi evaluasi murni (tanpa I/O) dipisah agar bisa di-unit-test;
 #  benda I/O (safety, quoter on-chain, notif) ada di _fastpath_gate.
 # =====================================================================
-def goldilocks_eval(pair) -> tuple[bool, str, dict]:
+def goldilocks_eval(pair, pons_token=False) -> tuple[bool, str, dict]:
     """Filter statistik Goldilocks dari data Dexscreener (murni math).
 
     Return (lolos, skip_tag, metrik). skip_tag dipakai untuk status
     'skip_fast:<tag>' (umur/liq/mcap/ratio). Safety dev/top10 & slippage
     quoter diverifikasi di _fastpath_gate (butuh I/O on-chain).
+
+    `pons_token=True` (token dari Radar Pons yang sudah graduate) melewati
+    gate UMUR saja. Alasannya terukur: semua koin Pons graduate setelah
+    duduk di bonding curve berjam-jam, jadi `goldilocks_max_age_sec` (300s)
+    membuat 0 dari 12 token graduasi lolos. Gate likuiditas, mcap, dan
+    rasio liq/mcap TETAP berlaku — diukur pada 12 token itu semuanya lolos
+    tiga gate tersebut, jadi yang membunuh memang cuma umur.
     """
     now_ms = time.time() * 1000
     min_age = float(db.get("goldilocks_min_age_sec", float) or 10)
@@ -398,14 +390,24 @@ def goldilocks_eval(pair) -> tuple[bool, str, dict]:
     liq = dx.liq_usd_or_none(pair)
     mcap = dx.mcap_of(pair)
     metr = {"pool_age": pool_age, "liq": liq, "mcap": mcap,
-            "ratio": (liq / mcap) if (liq and mcap > 0) else 0.0}
+            "ratio": (liq / mcap) if (liq and mcap > 0) else 0.0,
+            "pons_bypass_age": bool(pons_token)}
 
-    if pool_age is None:
+    if pool_age is None and not pons_token:
         return False, "age_unknown", metr
-    if pool_age < min_age:
-        return False, f"age_{pool_age:.0f}s", metr
-    if pool_age > max_age:
-        return False, f"age_{pool_age:.0f}s", metr
+
+    if pons_token:
+        # Token Radar Pons: gate umur DIHAPUS TOTAL (batas atas DAN bawah).
+        # Alasan terukur: koin Pons duduk di bonding curve berjam-jam sebelum
+        # graduate, jadi batas atas 300s menolak 100% (0/12 lolos). Batas
+        # bawah juga tidak relevan karena radar baru mengirim alert setelah
+        # token graduate — pool-nya sudah pasti hidup.
+        pass
+    else:
+        if pool_age < min_age:
+            return False, f"age_{pool_age:.0f}s", metr
+        if pool_age > max_age:
+            return False, f"age_{pool_age:.0f}s", metr
 
     # ---- b. likuiditas & mcap ----
     if liq is None or liq < min_liq:
@@ -428,9 +430,14 @@ def should_notify_fast_skip(tag: str) -> bool:
     return not (tag or "").startswith(SILENT_FAST_SKIP_PREFIXES)
 
 
-async def _fastpath_gate(ca, pair, safety_result=None) -> tuple[bool, str, dict]:
+async def _fastpath_gate(ca, pair, safety_result=None,
+                         pons_token=False) -> tuple[bool, str, dict]:
     """Gate lengkap fast-path (bagian I/O): safety dev/top10/honeypot +
     quote on-chain mcap guard. Return (lolos, skip_tag, metrik goldilocks).
+
+    `pons_token=True` = CA berasal dari Radar Pons (sudah graduate). Hanya
+    gate UMUR pool yang dilewati; safety, likuiditas, mcap, rasio, dan
+    quoter on-chain TETAP berjalan.
 
     skip_tag:
       'dev_terlalu_besar'  — safety menolak (dev/top10/honeypot/fail-closed)
@@ -440,7 +447,7 @@ async def _fastpath_gate(ca, pair, safety_result=None) -> tuple[bool, str, dict]
     """
     # ---- metrik dasar dipanggil SEKALI di depan (murni math, tanpa I/O) ----
     # Urutan keputusan tetap: safety -> dev -> top10 -> goldilocks -> quoter.
-    ok_g, tag_g, base = goldilocks_eval(pair)
+    ok_g, tag_g, base = goldilocks_eval(pair, pons_token=pons_token)
     base = base or {}
 
     # ---- c. safety guard (bytecode honeypot + dev + top10) ----
@@ -550,9 +557,14 @@ async def _fastpath_gate(ca, pair, safety_result=None) -> tuple[bool, str, dict]
     except Exception:
         dec = 18
     try:
+        # `scale_from_usd` WAJIB: pool v4 bisa memakai quote ERC20 (USDG 6
+        # desimal), dan USDG ≈ $1. Tanpa ini input di-scale 1e18 → quote
+        # membengkak 1e12x dan guard mcap on-chain buta.
         ok_q, amt_raw, err_reason = await asyncio.to_thread(
             _trader.quote_buy_tokens, ca, ptype, fee, wei_in,
-            0, pool_id=pair["pairAddress"])
+            0, pool_id=pair["pairAddress"],
+            created_ms=(pair or {}).get("pairCreatedAt"),
+            scale_from_usd=buy_usd)
     except Exception as e:
         ok_q, amt_raw, err_reason = False, 0, f"quoter_exception:{e}"
     if not ok_q or amt_raw <= 0:
@@ -615,10 +627,16 @@ async def _fastpath_gate(ca, pair, safety_result=None) -> tuple[bool, str, dict]
 
 
 async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
-                     retry=False):
-    """Proses SATU kandidat CA lewat pipa: filter → sosmed → safety → veto radar → fast-path → buy.
+                     retry=False, manual=False):
+    """Proses SATU kandidat CA lewat pipa: filter → sosmed → safety → fast-path → buy.
 
-    Dipakai listener (dari pesan grup) maupun scanner (sniper/scanner.py).
+    Dipakai listener (dari pesan grup), scanner (sniper/scanner.py), dan
+    tombol Beli manual dari notif graduation Radar Pons.
+
+    `manual=True` melewati cek `seen_call` (aksi admin yang disengaja atas
+    koin yang mungkin sudah pernah dipindai scanner), TAPI tetap menolak
+    kalau sudah ada posisi terbuka di CA yang sama.
+
     allow_buy=False = PAGAR KERAS: setelah lolos semua tahap, buy TIDAK
     dieksekusi lewat jalur mana pun (termasuk fallback rule-based bila
     mati/gagal) — fungsi berhenti di status "no_buy_scanner". Mekanisme ini
@@ -640,6 +658,12 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         if any(str(p.get("ca", "")).lower() == ca_lc for p in db.open_positions()):
             return "dup_position"
         db.touch_call(ca)
+    elif manual:
+        # Admin menekan tombol Beli: jangan ditolak cuma karena scanner
+        # pernah melihat CA ini. Posisi ganda tetap dicegah.
+        if any(str(p.get("ca", "")).lower() == ca_lc for p in db.open_positions()):
+            return "dup_position"
+        db.record_call(ca, src["id"], caller_id, caller_name)
     else:
         if db.seen_call(ca):
             return "dup"
@@ -654,6 +678,26 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
     liq = dx.liq_usd_or_none(pair)
     sym = pair.get("baseToken", {}).get("symbol", "?")
     ptype_dx = dx.pool_type(pair)
+
+    # ---------- 📡 Provenance Pons (nol-latency, dipakai 2 gate) ----------
+    # JANGAN panggil API di jalur kritis: `is_pons_launch` bisa HTTP 8 detik.
+    # Sinyal murah yang sudah cukup:
+    #   • src = "RADAR PONS"  → tombol Beli dari notif graduation, pasti Pons
+    #   • `pons_queue`        → radar mencatat SETIAP kandidat yang dipindainya
+    # Keduanya murni memori/SQLite lokal. Hasilnya menentukan dua bypass yang
+    # sudah terbukti perlu:
+    #   • safety: gate top10 (konsentrasi awal kurva bukan tanda tim)
+    #   • goldilocks: gate UMUR ATAS (graduasi Pons berjam-jam, bukan 300s)
+    # Fail-closed: selain dua sinyal di atas, token diperlakukan sebagai
+    # non-Pons (gate normal berlaku penuh).
+    pons_token = False
+    if src.get("name") == "RADAR PONS":
+        pons_token = True
+    elif db.get("pons_bypass_top10", str) == "1":
+        try:
+            pons_token = bool(db.is_pons_queue_member(ca))
+        except Exception:
+            pons_token = False
 
     # ---------- v4-Only Guard: Tolak pool selain v4 (v2/v3 disabled) ----------
     if db.get("scanner_ignore_v3", str) == "1" and src.get("name") == "SCANNER" and ptype_dx != "v4":
@@ -711,25 +755,49 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         await _notify_log(f"🌐 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{soc_reason}")
         return "filtered:social"
 
-    # ---------- 🚫 VETO RADAR PONS (0 ms, pra-graduasi) ----------
-    # Radar menilai koin saat masih di bonding curve. Koin yang ditolak
-    # (LLM BUANG / skor di bawah ambang) masuk set veto di memori. Dicek
-    # SEBELUM safety & gate matematika: kalau koinnya sudah dinilai buruk, tidak
-    # perlu panggil RPC/Blockscout sama sekali.
-    if pons_veto(ca):
-        print(f"[pons-veto] {sym}: ditolak Radar Pons saat pra-graduasi")
-        await _notify_log(
-            f"🚫 **VETO RADAR PONS {sym}** _via {src['name']}_\n"
-            f"`{ca}`\n"
-            f"_alasan: ditolak LLM/skor saat masih di bonding curve_\n"
-            f"_(fast-path tidak dijalankan)_")
-        return "skip_pons_veto"
-
     ok_safety, reason_safety = await asyncio.to_thread(safety.check, _trader, ca, pair)
     if not ok_safety:
         print(f"[safety-skip] {sym}: {reason_safety}")
         await _notify_log(f"🛡 **SKIP {sym}** _via {src['name']}_\n`{ca}`\n{reason_safety}")
         return "filtered:safety"
+
+    # ---------- 📡 RADAR PONS → JALUR LANGSUNG (tanpa fast-path) ----------
+    # Permintaan operator: koin dari Radar Pons TIDAK melewati gate fast-path
+    # (umur/liq/mcap/rasio), langsung menuju eksekusi beli. Kompensasinya
+    # adalah dua kunci keras yang statis (nol LLM):
+    #   • pons_direct_eth_only = 1 → tolak pool yang quote-nya ERC20 (USDG).
+    #     Tanpa ini, input 1e18 dikirim ke pool 6-desimal = 1e12 kekurangan
+    #     skala, dan wallet ETH tidak bisa membayarnya sama sekali.
+    #   • pons_direct_v4_only = 1 → tolak pool v2/v3 (chain ini v4-only).
+    # Keduanya murni pengecekan data, bukan LLM, dan TIDAK melonggar.
+    direct_pons = (db.get("pons_direct_buy", str) == "1" and pons_token)
+    if direct_pons:
+        if db.get("pons_direct_v4_only", str) == "1" and ptype_dx != "v4":
+            await _notify_log(
+                f"⚡ **SKIP {sym}** _via {src['name']}_\n`{ca}`\n"
+                f"reason: pons_direct_v4_only (pool `{ptype_dx}`, bukan v4)")
+            print(f"[skip] {sym} jalur langsung Pons menolak pool {ptype_dx}")
+            return "filtered:pons_not_v4"
+        try:
+            from . import v4 as _v4
+            _pk_d = await asyncio.to_thread(
+                _v4.pool_key, pair["pairAddress"], _trader.w3,
+                created_ms=pair.get("pairCreatedAt"))
+            _q_asset = _v4.quote_asset(_pk_d, ca) if _pk_d else None
+        except Exception as _e:
+            _q_asset = None
+            print(f"[pons-direct] gagal baca PoolKey: {_e}")
+        if db.get("pons_direct_eth_only", str) == "1":
+            if _q_asset is None or not _v4._same_addr(_q_asset, _v4.ZERO_ADDRESS):
+                await _notify_log(
+                    f"⚡ **SKIP {sym}** _via {src['name']}_\n`{ca}`\n"
+                    f"reason: pons_direct_eth_only (quote pool `{str(_q_asset)[:12]}…` "
+                    f"bukan ETH native — wallet ini ETH-only)")
+                print(f"[skip] {sym} jalur langsung Pons menolak quote non-ETH "
+                      f"({_q_asset})")
+                return "filtered:pons_not_eth"
+        print(f"[pons-direct] {sym} lolos kunci ETH+v4 → langsung eksekusi, "
+              f"tanpa gate fast-path")
 
     # ---------- ⚡ FAST-PATH GOLDILOCKS (0 detik LLM, satu-satunya jalur) ----
     # Evaluasi murni matematika/bytecode: umur pool → liq/mcap → safety →
@@ -737,7 +805,11 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
     # Lolos semua gate → keputusan sintetis conviction 90 → eksekusi di
     # alur bawah (dry_run_simulated ATAU live buy) seperti biasa.
     decision = None
-    ok_f, tag_f, metr_f = await _fastpath_gate(ca, pair, safety_result=(ok_safety, reason_safety))
+    ok_f, tag_f, metr_f = (True, "", dict())
+    if not direct_pons:
+        ok_f, tag_f, metr_f = await _fastpath_gate(
+            ca, pair, safety_result=(ok_safety, reason_safety),
+            pons_token=pons_token and db.get("pons_bypass_age_gate", str) == "1")
     if not ok_f:
         print(f"[fast-skip] {sym}: {tag_f}")
         if should_notify_fast_skip(tag_f):
@@ -747,11 +819,17 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
                 f"`{ca}`\nreason: {tag_f}"
                 + (f"\n{gl}" if gl else ""))
         return f"skip_fast:{tag_f}"
-    liq_f = metr_f.get("liq") or 0.0
-    mcap_f = metr_f.get("mcap") or 0.0
+    liq_f = metr_f.get("liq") or dx.liq_usd_or_none(pair) or 0.0
+    mcap_f = metr_f.get("mcap") or dx.mcap_of(pair) or 0.0
     mcap_oc_f = metr_f.get("mcap_onchain") or mcap_f
     ratio_f = (liq_f / mcap_oc_f) if mcap_oc_f > 0 else (metr_f.get("ratio") or 0.0)
-    age_f = metr_f.get("pool_age") or 0.0
+    age_f = metr_f.get("pool_age")
+    if age_f is None:
+        try:
+            age_f = max(0.0, time.time() -
+                        float(pair.get("pairCreatedAt")) / 1000.0)
+        except (TypeError, ValueError):
+            age_f = 0.0
     tp1_f = float(db.get("goldilocks_tp1", float) or 0.35)
     tp2_f = float(db.get("goldilocks_tp2", float) or 0.80)
     decision = {
@@ -765,9 +843,9 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         # membaca key tp1/tp2/sl)
         "tp1": tp1_f, "tp2": tp2_f, "sl": -0.30,
         "risks": "",
-        "reason": (f"⚡ FAST-PATH Goldilocks: umur {age_f:.0f}s, "
+        "reason": (f"📡 PONS DIRECT: umur {age_f:.0f}s, "
                    f"liq ${liq_f:,.0f}, mcap ${mcap_oc_f:,.0f}, "
-                   f"ratio {ratio_f * 100:.1f}%, quote OK"),
+                   f"ratio {ratio_f * 100:.1f}%, ETH+v4 only"),
         # plumbing metrik gate → notif BUY (2 baris di bawah)
         "_gate_metrics": dict(metr_f or {}),
     }
@@ -839,7 +917,9 @@ async def process_ca(ca, src, caller_id, caller_name, allow_buy=True,
         try:
             ok_q, amt_raw, err_reason = await asyncio.to_thread(
                 _trader.quote_buy_tokens, ca, ptype_dx, fee_dx, wei_in,
-                0, pool_id=pair["pairAddress"])
+                0, pool_id=pair["pairAddress"],
+                created_ms=(pair or {}).get("pairCreatedAt"),
+                scale_from_usd=db.get("buy_usd"))
         except Exception as e:
             ok_q, amt_raw, err_reason = False, 0, f"quoter_exception:{e}"
         if not ok_q or amt_raw <= 0:

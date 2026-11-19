@@ -225,6 +225,11 @@ def init():
             "quote_asset_class": "TEXT DEFAULT ''",
             "threshold_quote": "REAL DEFAULT 0.0",
             "raised_usd": "REAL DEFAULT 0.0",
+            # Penanda sudah dikirim notif "lolos ke DEX + tombol Beli"
+            # setelah koin graduate. 0 = belum, 1 = sudah.
+            "graduated_notified": "INTEGER DEFAULT 0",
+            # poolId v4 dari API Pons setelah token keluar dari bonding curve.
+            "pool_id": "TEXT DEFAULT ''",
         }
         for col_name, col_def in curve_cols.items():
             if col_name not in cols:
@@ -392,6 +397,7 @@ def open_position(**kw):
     kw.setdefault("caller_name", None)
     kw.setdefault("buy_tx", None)
     kw.setdefault("is_simulated", 0)
+    kw.setdefault("honeypot", 0)
     with _lock, _conn_cm() as c:
         c.execute("""INSERT INTO positions
             (ca,symbol,pair_address,chain_slug,pool_type,fee,entry_price_usd,
@@ -1368,15 +1374,72 @@ def reject_pons(ca, reason, status="rejected", score=0, verdict="BUANG",
                       block_buy=1 if block_buy else 0)
 
 
-def get_pons_blocked_cas() -> set:
-    """Set CA yang diveto Radar Pons (dibaca listener sebagai blacklist 0 ms).
+def pons_seen_for_new_launch(ca) -> bool:
+    """True bila CA sudah pernah dikirimi alert (mode baru maupun graduasi).
 
-    Hanya baris `block_buy=1`. Dipanggil tiap 30 detik oleh loop refresh,
-    BUKAN per kandidat — jalur beli cukup memeriksa set di memori.
+    Dipakai `scan_new_launches` supaya token yang sama tidak dikirim dua kali
+    saat masih murah maupun saat nanti graduate.
     """
     with _lock, _conn_cm() as c:
-        return {str(r["ca"]).lower() for r in
-                c.execute("SELECT ca FROM pons_queue WHERE block_buy=1")}
+        row = c.execute(
+            "SELECT status FROM pons_queue WHERE ca=?",
+            (str(ca).strip().lower(),)).fetchone()
+    return bool(row and row["status"] in ("alerted", "graduated"))
+
+
+def pons_new_alert_count_since(ts) -> int:
+    """Jumlah alert mode-launch-baru dalam jendela waktu (untuk cap per jam)."""
+    with _lock, _conn_cm() as c:
+        row = c.execute(
+            "SELECT COUNT(*) n FROM pons_queue "
+            "WHERE status IN ('alerted','graduated') AND alerted_at >= ?",
+            (int(ts),)).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def pons_alerted_for_graduation(limit=25, max_age_sec=86400):
+    """Baris ALERTED yang belum pernah dinotif 'sudah launch di DEX'.
+
+    `max_age_sec` membatasi ke alert yang masih relevan (default 24 jam).
+    Tanpa batas ini, restart pertama akan membanjiri admin dengan tombol
+    beli untuk token yang sudah mati berhari-hari.
+    """
+    cutoff = int(time.time()) - int(max_age_sec)
+    with _lock, _conn_cm() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM pons_queue "
+            "WHERE status='alerted' AND COALESCE(graduated_notified,0)=0 "
+            "AND COALESCE(alerted_at,0) >= ? "
+            "ORDER BY COALESCE(alerted_at,0) DESC LIMIT ?",
+            (cutoff, int(limit)))]
+
+
+def suppress_stale_pons_graduation(max_age_sec=86400) -> int:
+    """Tandai alert lama sebagai 'sudah dinotif' TANPA mengirim pesan.
+
+    Return jumlah baris yang dibungkam. Dipanggil di awal graduation loop
+    supaya backlog historis tidak jadi spam tombol beli.
+    """
+    cutoff = int(time.time()) - int(max_age_sec)
+    with _lock, _conn_cm() as c:
+        cur = c.execute(
+            "UPDATE pons_queue SET graduated_notified=1 "
+            "WHERE status='alerted' AND COALESCE(graduated_notified,0)=0 "
+            "AND COALESCE(alerted_at,0) < ?", (cutoff,))
+        return cur.rowcount or 0
+
+
+def mark_pons_graduated(ca, pool_id=None):
+    """Tandai notif graduation sudah terkirim (idempoten)."""
+    ca = (ca or "").strip().lower()
+    if not ca:
+        return
+    with _lock, _conn_cm() as c:
+        if pool_id:
+            c.execute("UPDATE pons_queue SET graduated_notified=1, "
+                      "pool_id=COALESCE(pool_id, ?) WHERE ca=?", (pool_id, ca))
+        else:
+            c.execute("UPDATE pons_queue SET graduated_notified=1 WHERE ca=?", (ca,))
 
 
 def is_pons_queue_member(ca) -> bool:
